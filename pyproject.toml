@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gatebroker"
 version = "0.1.0"
-description = "Fail-closed authorization broker that exchanges an OIDC identity for scoped access to an OpenAI-compatible model gateway"
+description = "Fail-closed authorization broker that exchanges an OIDC identity for scoped access to an OpenAI- or Anthropic-compatible model gateway"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]

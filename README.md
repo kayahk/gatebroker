@@ -1,6 +1,7 @@
 # GateBroker
 
-**A fail-closed authorization broker for OpenAI-compatible model gateways.**
+**A fail-closed authorization broker for OpenAI- and Anthropic-compatible model
+gateways.**
 
 Your users sign in with the identity they already have. GateBroker exchanges that
 identity for scoped access to a model gateway, decides which models they may use,
@@ -63,6 +64,13 @@ the library boundary has no gateway-specific code. A gateway with different path
 or schemas needs an adapter outside this project, because GateBroker deliberately
 does not translate between provider protocols.
 
+Both API families are first-class: Chat Completions, Embeddings and Responses on
+the OpenAI side, Messages on the Anthropic side, each with its own request
+sanitizing, identity attribution and bounded streaming. Which models that reaches
+is a separate question, and not one GateBroker answers — a model name is just a
+string in a policy's allow-list, so what it resolves to is whatever your gateway
+routes it to.
+
 ## Quick start
 
 ```shell
@@ -102,8 +110,8 @@ export ENGINEERING_GATEWAY_KEY="<server-side-gateway-key>"
 python -m gatebroker.runtime
 ```
 
-Clients then use the ordinary OpenAI-compatible paths, authenticating with their
-own identity token rather than a gateway key:
+Clients then use the ordinary paths, authenticating with their own identity token
+rather than a gateway key:
 
 ```shell
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -111,6 +119,20 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
+
+Anthropic-compatible clients use `/v1/messages` and must send an
+`anthropic-version` header, which the broker requires and forwards:
+
+```shell
+curl http://127.0.0.1:8080/v1/messages \
+  -H "Authorization: Bearer <access-token>" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-sonnet-4", "max_tokens": 256, "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+Either way the model has to be listed by the policy the caller resolves to, or the
+request is denied without the gateway being called.
 
 For Kubernetes, [`deploy/`](deploy/) has a complete reference deployment and
 explains what the platform around it must provide.
