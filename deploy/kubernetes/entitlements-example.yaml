@@ -1,0 +1,40 @@
+# Example entitlement projection. Do NOT commit real key material.
+#
+# The broker reads its policy document and each key it references from the same
+# directory, and is indifferent to what produced the files. A plain Secret is
+# shown here for readability; an external secret manager, a CSI driver, or a
+# sidecar-written tmpfs all work unchanged as long as the files appear at
+# GABRO_KEY_DIR.
+#
+# `policies.json` is non-secret: it names the key it needs (`key_ref`) and never
+# carries a value. The key file itself holds the upstream gateway credential, so
+# in a real deployment it must come from a secret manager rather than from Git.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gatebroker-entitlements
+type: Opaque
+stringData:
+  policies.json: |
+    {
+      "policies": [
+        {
+          "id": "engineering",
+          "entra_group_ids": ["REPLACE_GROUP_OBJECT_ID"],
+          "allowed_models": ["gpt-4o-mini", "gpt-4o"],
+          "key_ref": "ENGINEERING_GATEWAY_KEY",
+          "priority": 10
+        },
+        {
+          "id": "automation",
+          "entra_app_roles": ["Broker.Access"],
+          "allowed_models": ["gpt-4o-mini"],
+          "key_ref": "AUTOMATION_GATEWAY_KEY",
+          "priority": 20
+        }
+      ]
+    }
+  # One file per key_ref. REPLACE with values projected from a secret manager.
+  ENGINEERING_GATEWAY_KEY: REPLACE
+  AUTOMATION_GATEWAY_KEY: REPLACE

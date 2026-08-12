@@ -1,0 +1,120 @@
+# Minimal, self-contained GateBroker deployment.
+#
+# Replace every value marked REPLACE. This example deliberately uses only core
+# Kubernetes objects so it can be read as the deployment contract rather than as
+# a template for one platform. See deploy/README.md.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gatebroker
+  labels:
+    app.kubernetes.io/name: gatebroker
+spec:
+  # The bundled rate limiter is process-local, so it only bounds a single
+  # replica. Supply a shared limiter before scaling past one.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gatebroker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gatebroker
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gatebroker
+          # REPLACE with an immutable digest or commit-SHA tag.
+          image: ghcr.io/OWNER/gatebroker@sha256:REPLACE
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # Identity provider. The JWKS URL must be the issuer tenant's own
+            # discovery endpoint; the runtime rejects anything else.
+            - name: GABRO_ENTRA_ISSUER
+              value: https://login.microsoftonline.com/REPLACE_TENANT_ID/v2.0
+            - name: GABRO_ENTRA_AUDIENCE
+              value: REPLACE_BROKER_APPLICATION_CLIENT_ID
+            - name: GABRO_ENTRA_REQUIRED_SCOPE
+              value: Broker.Access
+            - name: GABRO_ENTRA_JWKS_URL
+              value: https://login.microsoftonline.com/REPLACE_TENANT_ID/discovery/v2.0/keys
+
+            # Entitlements. The policy document and every key it references are
+            # read from the same projected, read-only directory.
+            - name: GABRO_POLICY_PATH
+              value: /etc/gatebroker/policies.json
+            - name: GABRO_KEY_DIR
+              value: /etc/gatebroker
+
+            # Upstream gateway. Must be HTTPS on port 443 unless the
+            # cluster-local plaintext opt-in below is set.
+            - name: GABRO_UPSTREAM_BASE_URL
+              value: https://REPLACE_GATEWAY_HOST
+            - name: GABRO_UPSTREAM_TRUSTED_HOSTS
+              value: REPLACE_GATEWAY_HOST
+
+            # Optional. Permits an http:// upstream, and only toward in-cluster
+            # Service DNS names, for a same-cluster gateway hop.
+            - name: GABRO_UPSTREAM_ALLOW_CLUSTER_LOCAL_PLAINTEXT
+              value: "false"
+
+            - name: GABRO_RATE_LIMIT_REQUESTS
+              value: "60"
+            - name: GABRO_RATE_LIMIT_WINDOW_SECONDS
+              value: "60"
+          volumeMounts:
+            - name: entitlements
+              mountPath: /etc/gatebroker
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            # Reports ready only while the JWKS snapshot is fresh and every
+            # policy-referenced key resolves.
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: entitlements
+          secret:
+            secretName: gatebroker-entitlements
+            defaultMode: 0400
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gatebroker
+  labels:
+    app.kubernetes.io/name: gatebroker
+spec:
+  selector:
+    app.kubernetes.io/name: gatebroker
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
