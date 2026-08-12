@@ -1,0 +1,54 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (${{ matrix.platform }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            runner: macos-latest
+            python: "3.11"
+          - platform: Linux
+            runner: ubuntu-latest
+            python: "3.11"
+          - platform: Linux
+            runner: ubuntu-latest
+            python: "3.13"
+          - platform: Windows
+            runner: windows-latest
+            python: "3.11"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.9.26"
+          python-version: ${{ matrix.python }}
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra test
+
+      - name: Run unit tests
+        run: uv run pytest -q
+
+      - name: Run static and dependency security checks
+        if: runner.os == 'Linux' && matrix.python == '3.11'
+        shell: bash
+        run: |
+          uv run ruff check .
+          uv run bandit -q -r src
+          uv run pip-audit

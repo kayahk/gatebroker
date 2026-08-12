@@ -1,0 +1,231 @@
+name: Release CLI
+
+on:
+  push:
+    # Restrict creation of these tags to trusted maintainers with a repository ruleset.
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Bundle (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-14
+            executable: gabro
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            executable: gabro
+          - platform: windows-x64
+            runner: windows-2025
+            executable: gabro.exe
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          # Track the supported 3.11 minor line; an exact patch is not available
+          # on every runner image.
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.11.0
+        with:
+          version: "0.9.26"
+
+      - name: Install locked dependencies and test
+        shell: bash
+        run: |
+          uv sync --locked --extra bundle --extra test
+          uv run pytest -q
+
+      - name: Refuse to ship an unconfigured distribution profile
+        shell: bash
+        run: |
+          # A signed release that still carries the placeholder profile would
+          # point users at the example endpoint, so fail before bundling.
+          uv run python -c "
+          import sys
+          from gatebroker import profile
+          if not profile.CONFIGURED:
+              sys.exit(
+                  'gatebroker/profile.py is still the placeholder. Set your tenant, '
+                  'client, scope, gateway URL and models, then set CONFIGURED = True.'
+              )
+          "
+
+      - name: Assert Apple Silicon runner
+        if: runner.os == 'macOS'
+        shell: bash
+        run: test "$(uname -m)" = arm64
+
+      - name: Build self-contained executable
+        shell: bash
+        run: |
+          uv run python -m PyInstaller --noconfirm --clean --onefile --name gabro \
+            --collect-all keyring src/gatebroker/cli.py
+          mkdir -p "release/gabro-${{ matrix.platform }}"
+          cp "dist/${{ matrix.executable }}" "release/gabro-${{ matrix.platform }}/"
+
+      - name: Check for macOS signing configuration
+        id: macos_signing
+        if: runner.os == 'macOS'
+        env:
+          APPLE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.APPLE_SIGNING_CERTIFICATE_BASE64 }}
+          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_DEVELOPER_ID_INSTALLER: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY_BASE64 }}
+        shell: bash
+        run: |
+          # Signing needs an Apple Developer account, which a fork may not have.
+          # Report whether every input is present so the release can still ship a
+          # clearly-unsigned archive instead of failing outright.
+          configured=true
+          for required in APPLE_SIGNING_CERTIFICATE_BASE64 APPLE_SIGNING_CERTIFICATE_PASSWORD \
+            APPLE_DEVELOPER_ID_APPLICATION APPLE_DEVELOPER_ID_INSTALLER APPLE_NOTARY_ISSUER \
+            APPLE_NOTARY_KEY_ID APPLE_NOTARY_PRIVATE_KEY_BASE64; do
+            if [ -z "${!required}" ]; then
+              configured=false
+              echo "::notice::${required} is not configured; publishing an unsigned macOS archive."
+            fi
+          done
+          echo "configured=${configured}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign, package, and notarize macOS installer
+        if: runner.os == 'macOS' && steps.macos_signing.outputs.configured == 'true'
+        env:
+          APPLE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.APPLE_SIGNING_CERTIFICATE_BASE64 }}
+          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_DEVELOPER_ID_INSTALLER: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY_BASE64 }}
+          MACOS_BUNDLE_IDENTIFIER: ${{ vars.MACOS_BUNDLE_IDENTIFIER }}
+        shell: bash
+        run: |
+          certificate="${RUNNER_TEMP}/certificate.p12"
+          notary_key="${RUNNER_TEMP}/AuthKey.p8"
+          keychain="${RUNNER_TEMP}/build.keychain-db"
+          printf '%s' "${APPLE_SIGNING_CERTIFICATE_BASE64}" | base64 -D > "${certificate}"
+          printf '%s' "${APPLE_NOTARY_PRIVATE_KEY_BASE64}" | base64 -D > "${notary_key}"
+          security create-keychain -p "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" "${keychain}"
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" "${keychain}"
+          security import "${certificate}" -P "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain}"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" "${keychain}"
+          security list-keychains -d user -s "${keychain}"
+          codesign --force --options runtime --timestamp --sign "${APPLE_DEVELOPER_ID_APPLICATION}" "release/gabro-${{ matrix.platform }}/gabro"
+          codesign --verify --strict --verbose=2 "release/gabro-${{ matrix.platform }}/gabro"
+          mkdir payload
+          mkdir -p release-assets
+          cp "release/gabro-${{ matrix.platform }}/gabro" payload/gabro
+          release_version="${GITHUB_REF_NAME#v}"
+          test -n "${release_version}"
+          identifier="${MACOS_BUNDLE_IDENTIFIER:-org.gatebroker.gabro}"
+          pkgbuild --root payload --identifier "${identifier}" --version "${release_version}" --install-location /usr/local/bin --sign "${APPLE_DEVELOPER_ID_INSTALLER}" "release-assets/gabro-macos-arm64.pkg"
+          xcrun notarytool store-credentials gabro-notary --key "${notary_key}" --key-id "${APPLE_NOTARY_KEY_ID}" --issuer "${APPLE_NOTARY_ISSUER}"
+          xcrun notarytool submit "release-assets/gabro-macos-arm64.pkg" --keychain-profile gabro-notary --wait
+          xcrun stapler staple "release-assets/gabro-macos-arm64.pkg"
+          spctl --assess --type install --verbose "release-assets/gabro-macos-arm64.pkg"
+
+      - name: Archive unsigned macOS bundle
+        if: runner.os == 'macOS' && steps.macos_signing.outputs.configured != 'true'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          tar -C release -czf "release-assets/gabro-macos-arm64-unsigned.tar.gz" "gabro-macos-arm64"
+
+      - name: Add local installer to Linux bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cat > "release/gabro-${{ matrix.platform }}/install.sh" <<'EOF'
+          #!/usr/bin/env sh
+          set -eu
+          destination="${HOME}/.local/bin"
+          mkdir -p "${destination}"
+          install -m 0755 "$(dirname "$0")/gabro" "${destination}/gabro"
+          printf '%s\n' "Installed gabro to ${destination}/gabro"
+          EOF
+          chmod 0755 "release/gabro-${{ matrix.platform }}/install.sh"
+
+      - name: Archive Linux bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          tar -C release -czf "release-assets/gabro-linux-x64.tar.gz" "gabro-linux-x64"
+
+      - name: Archive Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Compress-Archive -Path "release/gabro-windows-x64/*" -DestinationPath "release-assets/gabro-windows-x64.zip"
+
+      - name: Write SHA-256 checksum
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          assets = Path("release-assets")
+          for asset in assets.iterdir():
+              if not asset.is_file() or asset.suffix == ".sha256":
+                  continue
+              digest = hashlib.sha256()
+              with asset.open("rb") as source:
+                  for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              (assets / f"{asset.name}.sha256").write_text(
+                  f"{digest.hexdigest()}  {asset.name}\n", encoding="utf-8"
+              )
+          PY
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gabro-${{ matrix.platform }}
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Attest release asset
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.2.3
+        with:
+          subject-path: release-assets/*
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.1
+        with:
+          files: release-assets/*

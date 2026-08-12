@@ -1,0 +1,89 @@
+name: Publish container image
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.9.26"
+          python-version: "3.11"
+
+      - name: Install locked dependencies
+        run: uv sync --locked --extra test
+
+      - name: Run unit tests
+        run: uv run pytest -q
+
+  build-and-push:
+    name: Build and push
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Log in to the container registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image reference
+        id: image
+        shell: bash
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+          # Every build is addressable by its immutable commit SHA. A tag push
+          # additionally publishes the release version; nothing publishes
+          # `latest`, so a deployment always pins something immutable.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "tags=${repository}:${GITHUB_REF#refs/tags/},${repository}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${repository}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |-
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v3
+        with:
+          subject-name: ${{ steps.image.outputs.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
