@@ -44,6 +44,29 @@ serves_a_verifiable_chain() {
     | grep -q "Verify return code: 0"
 }
 
+# Compose pins one project name, so a stack started from another checkout of this
+# repository is the same project. Its containers keep the paths of the directory that
+# created them, which shows up as certificates that inexplicably fail to verify against
+# the files sitting right here. Name the situation instead.
+running_tls_source() {
+  container="$(compose ps --all --quiet keycloak 2>/dev/null | head -1)"
+  [ -n "${container}" ] || return 0
+  docker inspect --format \
+    '{{range .Mounts}}{{if eq .Destination "/etc/tls"}}{{.Source}}{{end}}{{end}}' \
+    "${container}" 2>/dev/null
+}
+
+foreign="$(running_tls_source)"
+if [ -n "${foreign}" ] && [ "${foreign}" != "${PWD}/tls" ]; then
+  echo "A demo stack from a different checkout is already running:" >&2
+  echo "  it is using ${foreign}" >&2
+  echo "  this one is ${PWD}/tls" >&2
+  echo >&2
+  echo "Both share the compose project name, so only one can run at a time." >&2
+  echo "Take it over with:  ./run.sh down && ./run.sh" >&2
+  exit 1
+fi
+
 if serves_a_verifiable_chain; then
   echo "The running identity provider presents a chain that matches the local CA."
 elif compose ps --status running --quiet keycloak 2>/dev/null | grep -q .; then

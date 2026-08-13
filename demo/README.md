@@ -146,6 +146,18 @@ That reports the version, which profile is in use, and the directory the code wa
 loaded from. A `profile: none set` line with the variable exported almost always means
 the checkout predates this feature, so `git pull` first.
 
+Signing in more than once used to leave a stale account behind and every later command
+failed with "Multiple cached accounts were found" — recreating the demo is enough to
+cause it, since a rebuilt Keycloak issues new subject identifiers for the same username.
+`login` now keeps only the account that just signed in. To clear an older cache:
+
+```shell
+uv run gabro logout
+```
+
+Note the `uv run` prefix: from a source checkout `gabro` is not on your PATH. The CLI's
+own messages take that into account and name whichever form will work.
+
 `GABRO_DEV_PROFILE` is read **only** by a build whose `profile.py` is still
 unconfigured, which is what makes it safe. A configured distribution has its
 coordinates compiled in and ignores the variable entirely, so it cannot be used to
@@ -201,6 +213,15 @@ and calls the provider as itself, so internal user identifiers need not be hande
 a third party. That is why the mock provider in this demo never sees a user id, and
 why the checks do not look for one. The observable hop for attribution is
 broker-to-gateway, which this topology does not expose.
+
+## One stack at a time
+
+Compose pins a single project name, so two checkouts of this repository — a second clone,
+or a git worktree — address the same stack. Whichever ran last owns the containers, and
+they keep the paths of the directory that created them, which surfaces as certificates
+that inexplicably fail to verify against the files sitting right next to you. `run.sh`
+detects this and tells you which directory owns the running stack; take it over with
+`./run.sh down && ./run.sh`.
 
 ## If something does not come up
 

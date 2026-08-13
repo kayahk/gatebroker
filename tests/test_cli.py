@@ -769,3 +769,93 @@ def test_a_renewal_that_succeeds_returns_the_token(monkeypatch) -> None:
     )
 
     assert cli._acquire_access_token() == "renewed"
+
+
+def test_login_leaves_exactly_one_cached_account(monkeypatch) -> None:
+    """A stale account otherwise makes every later command fail until logout is found.
+
+    An identity provider that gets rebuilt issues new subject identifiers for the same
+    username, so signing in again is enough to accumulate one.
+    """
+    stale = {"home_account_id": "old-id", "username": "alice"}
+    fresh = {"home_account_id": "new-id", "username": "alice"}
+    removed: list[dict] = []
+    application = Mock()
+    application.get_accounts.return_value = [stale, fresh]
+    application.remove_account.side_effect = removed.append
+    application.initiate_device_flow.return_value = {
+        "user_code": "CODE", "verification_uri": "https://idp.example.test/device"
+    }
+    application.acquire_token_by_device_flow.return_value = {
+        "access_token": "token", "id_token_claims": {"home_account_id": "new-id"}
+    }
+
+    monkeypatch.setattr(cli, "_load_cache", lambda: Mock(has_state_changed=False))
+    monkeypatch.setattr(cli, "_application", lambda _cache: application)
+    monkeypatch.setattr(cli, "_copy_device_code", lambda _code: False)
+    monkeypatch.setattr(cli.click, "launch", lambda _url: False)
+
+    result = CliRunner().invoke(cli.main, ["login"])
+
+    assert result.exit_code == 0
+    assert removed == [stale]
+
+
+def test_login_keeps_the_newest_account_when_claims_omit_the_identifier(monkeypatch) -> None:
+    stale = {"home_account_id": "old-id"}
+    fresh = {"home_account_id": "new-id"}
+    removed: list[dict] = []
+    application = Mock()
+    application.get_accounts.return_value = [stale, fresh]
+    application.remove_account.side_effect = removed.append
+    application.initiate_device_flow.return_value = {
+        "user_code": "CODE", "verification_uri": "https://idp.example.test/device"
+    }
+    application.acquire_token_by_device_flow.return_value = {"access_token": "token"}
+
+    monkeypatch.setattr(cli, "_load_cache", lambda: Mock(has_state_changed=False))
+    monkeypatch.setattr(cli, "_application", lambda _cache: application)
+    monkeypatch.setattr(cli, "_copy_device_code", lambda _code: False)
+    monkeypatch.setattr(cli.click, "launch", lambda _url: False)
+
+    assert CliRunner().invoke(cli.main, ["login"]).exit_code == 0
+    assert removed == [stale]
+
+
+def test_pruning_never_fails_a_successful_sign_in(monkeypatch) -> None:
+    """Housekeeping must not turn a completed sign-in into an error."""
+    application = Mock()
+    application.get_accounts.side_effect = RuntimeError("cache unavailable")
+    application.initiate_device_flow.return_value = {
+        "user_code": "CODE", "verification_uri": "https://idp.example.test/device"
+    }
+    application.acquire_token_by_device_flow.return_value = {"access_token": "token"}
+
+    monkeypatch.setattr(cli, "_load_cache", lambda: Mock(has_state_changed=False))
+    monkeypatch.setattr(cli, "_application", lambda _cache: application)
+    monkeypatch.setattr(cli, "_copy_device_code", lambda _code: False)
+    monkeypatch.setattr(cli.click, "launch", lambda _url: False)
+
+    assert CliRunner().invoke(cli.main, ["login"]).exit_code == 0
+
+
+def test_advice_names_a_command_that_exists_on_this_machine(monkeypatch) -> None:
+    """`gabro logout` is useless advice when gabro is not on PATH."""
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+    assert cli._invocation() == "uv run gabro"
+
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/local/bin/gabro")
+    assert cli._invocation() == "gabro"
+
+
+def test_multiple_account_error_tells_the_user_a_runnable_command(monkeypatch) -> None:
+    cache = Mock()
+    cache.has_state_changed = False
+    application = Mock()
+    application.get_accounts.return_value = [object(), object()]
+    monkeypatch.setattr(cli, "_load_cache", lambda: cache)
+    monkeypatch.setattr(cli, "_application", lambda _cache: application)
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+
+    with pytest.raises(click.ClickException, match="uv run gabro logout"):
+        cli._acquire_access_token()

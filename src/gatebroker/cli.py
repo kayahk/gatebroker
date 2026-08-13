@@ -59,6 +59,15 @@ def _settings() -> tuple[str, str, str, str]:
     return profile.TENANT_ID, profile.CLIENT_ID, profile.SCOPE, profile.BASE_URL
 
 
+def _invocation() -> str:
+    """Return how to invoke this CLI from where it is running.
+
+    Telling someone to run `gabro logout` is useless when `gabro` is not on their PATH,
+    which is the normal case for a source checkout driven through `uv run`.
+    """
+    return "gabro" if shutil.which("gabro") else "uv run gabro"
+
+
 def _agents_file() -> Path:
     """Return the platform-appropriate, non-secret local agent profile file."""
     if sys.platform == "darwin":
@@ -208,7 +217,9 @@ def _load_cache() -> msal.SerializableTokenCache:
                 _store_cache(sanitized)
             cache.deserialize(sanitized)
         except Exception as error:  # Cache contents must never be shown to the user.
-            raise click.ClickException("The stored sign-in state is invalid; run gabro logout, then login.") from error
+            raise click.ClickException(
+                f"The stored sign-in state is invalid; run {_invocation()} logout, then login."
+            ) from error
     return cache
 
 
@@ -322,8 +333,41 @@ def _device_code_login() -> None:
     result = application.acquire_token_by_device_flow(flow)
     if "access_token" not in result:
         raise click.ClickException("Device-code sign-in did not complete successfully.")
+    _retain_only_signed_in_account(application, result)
     _save_cache(cache)
     click.echo(f"Authentication completed. You can direct your agent at {base_url}")
+
+
+def _retain_only_signed_in_account(
+    application: msal.PublicClientApplication, result: Mapping[str, object]
+) -> None:
+    """Drop every cached account except the one that just signed in.
+
+    Only one account is ever usable: token acquisition refuses to guess between
+    several. Without this, a second sign-in leaves the first account behind and every
+    later command fails until the user finds `logout` -- and a stale account accumulates
+    easily, since an identity provider that is rebuilt issues new subject identifiers
+    for the same username.
+    """
+    try:
+        accounts = [account for account in application.get_accounts() if isinstance(account, Mapping)]
+    except Exception:
+        # Pruning is housekeeping. It must never turn a successful sign-in into a
+        # failure, whatever shape the identity library returns.
+        return
+    if len(accounts) < 2:
+        return
+
+    claims = result.get("id_token_claims")
+    signed_in = claims.get("home_account_id") if isinstance(claims, Mapping) else None
+    if not isinstance(signed_in, str) or not signed_in:
+        # Without an identifier to keep, keep the newest account, which is the one this
+        # flow just created.
+        signed_in = accounts[-1].get("home_account_id")
+    for account in accounts:
+        if account.get("home_account_id") != signed_in:
+            with suppress(Exception):
+                application.remove_account(account)
 
 
 def _acquire_access_token() -> str:
@@ -333,7 +377,7 @@ def _acquire_access_token() -> str:
     accounts = application.get_accounts()
     if len(accounts) > 1:
         raise click.ClickException(
-            "Multiple cached accounts were found; run gabro logout, then login."
+            f"Multiple cached accounts were found; run {_invocation()} logout, then login."
         )
     if accounts:
         # Returns None when no cached token matches and the refresh could not be
@@ -352,7 +396,7 @@ def _acquire_access_token() -> str:
         reason = ""
     _save_cache(cache)
     raise click.ClickException(
-        f"No valid GateBroker sign-in is available; run gabro login.{reason}"
+        f"No valid GateBroker sign-in is available; run {_invocation()} login.{reason}"
     )
 
 
@@ -429,7 +473,7 @@ def _configure_local_agent(agent: str, command: Sequence[str], *, reset: bool) -
     agents = {} if reset else _load_agents()
     agents[agent] = list(command)
     _save_agents(agents)
-    click.echo(f"Configured local agent '{agent}'. Run it with: gabro run {agent}")
+    click.echo(f"Configured local agent '{agent}'. Run it with: {_invocation()} run {agent}")
 
 
 @main.command()
@@ -524,7 +568,8 @@ def run_command(agent: str, arguments: Sequence[str]) -> None:
     command = _load_agents().get(agent)
     if command is None:
         raise click.ClickException(
-            f"Local agent '{agent}' is not configured. Configure it with: gabro configure {agent} -- {agent}"
+            f"Local agent '{agent}' is not configured. "
+            f"Configure it with: {_invocation()} configure {agent} -- {agent}"
         )
     _run_with_broker_environment([*command, *arguments])
 
