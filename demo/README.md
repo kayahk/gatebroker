@@ -75,49 +75,49 @@ curl -s http://localhost:8080/v1/chat/completions \
 Swap `demo-large` for `demo-small` as `bob`, or try `carol`, to watch entitlement
 resolution refuse the call.
 
-The Keycloak admin console is at <https://localhost:8443> (`admin`/`admin`). The
-certificate is the demo's own, so your browser will warn once; accept it and
-continue.
+To browse the identity provider, see the one-line hosts entry below.
 
-## One Keycloak, two hostnames, and why
+## One name for Keycloak
 
-Tokens carry the issuer that minted them, and the broker validates it and requires the
-JWKS endpoint to share its origin. So the demo realm's issuer has to be a name that
-means the same thing to everyone who uses it, and inside the Compose network that name
-is `keycloak`.
-
-Your browser cannot resolve `keycloak`, so the server itself is left with no fixed
-hostname: Keycloak answers on whatever host the request arrived at, which keeps the
-admin console and the master realm on `localhost`. The demo realm then pins its own
-issuer with the realm-level `frontendUrl` attribute, so its tokens always say
-`https://keycloak:8443` however they were requested.
-
-Splitting it at the realm rather than the server matters, and getting it wrong is
-quietly confusing. Pinning the whole server to `keycloak` makes the console redirect
-your browser to a host it cannot look up. Serving only the console under `localhost`
-looks like it works, but the console is a browser app that authenticates against the
-*master* realm — and that realm's endpoints still pointed at `keycloak`, so it failed
-with "Something went wrong" and nothing in the server log, because the failure was in
-the browser. Leaving the issuer to follow the request host would be worse in the other
-direction: tokens fetched via `localhost` would carry an issuer the broker rejects.
-
-This is also why the `gabro` CLI section below needs a hosts-file entry. The CLI
-acquires real tokens, so it has to reach Keycloak by the issuer's own name.
-
-## Using the `gabro` CLI against the demo
-
-The automated checks use the password grant so they need no human at a browser. To
-drive the real device-code flow instead, point a local build at the demo realm.
-
-This is the one part that needs a hosts-file entry, for the reason above: the CLI
-acquires a real token, so it must reach Keycloak by the issuer's own name rather than
-through the console's `localhost` alias.
+Everything addresses Keycloak as `keycloak:8443`. Containers resolve it through
+Compose DNS. To reach it from your own machine — for the admin console or the `gabro`
+CLI — map the name once:
 
 ```shell
 echo '127.0.0.1 keycloak' | sudo tee -a /etc/hosts
 ```
 
-Then set the distribution profile in `src/gatebroker/profile.py`:
+Then the console is at <https://keycloak:8443> (`admin`/`admin`). Your browser will
+warn about the demo's own certificate; accept it and continue.
+
+**The end-to-end checks need none of this.** They run inside the network, where the
+name already resolves, so `./run.sh` works on a clean machine. The script tells you
+which situation you are in.
+
+Using one name is not incidental. Tokens carry the issuer that minted them, the broker
+validates it, and the JWKS endpoint must share its origin — so every party has to agree
+on a single name. Two earlier attempts to avoid the hosts entry both failed, and the
+second failed in an especially unhelpful way:
+
+- Pinning the server to `keycloak` while serving the console under `localhost` looks
+  right, but the console is a browser application that authenticates against the
+  *master* realm, and that realm still pointed at `keycloak`. The page loaded and then
+  died with "Something went wrong" and nothing in the server log, because the failing
+  request never left the browser.
+- Letting the issuer follow the request host fixes the console and breaks the broker:
+  tokens fetched through `localhost` carry an issuer it rejects.
+
+If you ever change the hostname here, check `authServerUrl` in the console's embedded
+`environment` block, not just whether the page loads. That is the value the browser
+authenticates against, and it is where both attempts went wrong.
+
+## Using the `gabro` CLI against the demo
+
+The automated checks use the password grant so they need no human at a browser. To
+drive the real device-code flow instead, point a local build at the demo realm. This
+needs the hosts entry from above, since the CLI acquires real tokens.
+
+Set the distribution profile in `src/gatebroker/profile.py`:
 
 ```python
 TENANT_ID = ""

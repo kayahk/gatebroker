@@ -38,8 +38,24 @@ compose up --build --detach --wait gatebroker
 
 echo
 echo "Stack is ready:"
-echo "  identity   https://localhost:8443  (admin/admin, realm gatebroker-demo)"
 echo "  broker     http://localhost:8080/healthz"
+
+# Tokens name `keycloak` as their issuer, so every party has to reach Keycloak by
+# that name. Containers do it through Compose DNS; a browser or the gabro CLI on
+# this machine needs a hosts entry. Say so plainly rather than leaving the user at
+# an opaque browser error.
+if getent hosts keycloak >/dev/null 2>&1 || ping -c 1 -t 1 keycloak >/dev/null 2>&1; then
+  echo "  identity   https://keycloak:8443   (admin/admin, realm gatebroker-demo)"
+else
+  echo "  identity   not reachable from this machine yet"
+  echo
+  echo "  The end-to-end checks below need nothing further: they run inside the"
+  echo "  network, where 'keycloak' already resolves."
+  echo
+  echo "  To open the admin console or use the gabro CLI, map the name once:"
+  echo "      echo '127.0.0.1 keycloak' | sudo tee -a /etc/hosts"
+  echo "  then visit https://keycloak:8443 (admin/admin)."
+fi
 
 if [ "${1:-check}" = "up" ]; then
   echo

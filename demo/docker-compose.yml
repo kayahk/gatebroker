@@ -18,11 +18,13 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-      # No server-wide hostname on purpose. Keycloak then answers on whatever host
-      # the request arrived at, so the admin console works in a browser on
-      # localhost. The demo realm pins its own issuer to https://keycloak:8443
-      # through the realm's frontendUrl attribute, which is what keeps tokens
-      # validatable by the broker no matter which host minted them.
+      # Tokens carry this as `iss`, and the broker validates the issuer and requires
+      # the JWKS endpoint to share its origin. Every party therefore has to reach
+      # Keycloak by this one name -- containers through Compose DNS, and your browser
+      # or the gabro CLI through a hosts-file entry (see README). Serving the admin
+      # console under a second name does not work: the console is a browser app that
+      # authenticates against the master realm, so it would still be sent here.
+      KC_HOSTNAME: https://keycloak:8443
       KC_HTTP_ENABLED: "false"
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
