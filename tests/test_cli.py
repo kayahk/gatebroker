@@ -650,10 +650,13 @@ def test_a_profile_that_fails_validation_leaves_the_module_untouched(
     location = _write_dev_profile(tmp_path, ca_bundle=str(tmp_path / "absent.pem"))
     monkeypatch.setenv("GABRO_DEV_PROFILE", location)
     monkeypatch.setattr(profile, "CONFIGURED", False)
-    before = (profile.MODELS, profile.CLIENT_ID, profile.BASE_URL, profile.CA_BUNDLE)
+    def state():
+        return (profile.MODELS, profile.CLIENT_ID, profile.BASE_URL, profile.CA_BUNDLE)
+
+    before = state()
 
     with pytest.raises(RuntimeError, match="ca_bundle"):
         profile._apply_development_profile()
 
-    assert (profile.MODELS, profile.CLIENT_ID, profile.BASE_URL, profile.CA_BUNDLE) == before
+    assert state() == before
     assert profile.DEVELOPMENT is False
