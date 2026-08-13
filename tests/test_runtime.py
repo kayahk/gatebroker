@@ -16,8 +16,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 import gatebroker.runtime as runtime
 from gatebroker.runtime import (
-    EntraJwksVerifier,
     FixedWindowRateLimiter,
+    JwksVerifier,
     create_runtime_app,
     load_runtime_settings,
 )
@@ -26,7 +26,7 @@ POLICIES = {
     "policies": [
         {
             "id": "researchers",
-            "entra_group_ids": ["group-research"],
+            "group_ids": ["group-research"],
             "allowed_models": ["gpt-4o-mini"],
             "key_ref": "RESEARCHERS_KEY",
             "priority": 10,
@@ -37,10 +37,10 @@ POLICIES = {
 
 def runtime_environment(policy_path: Path) -> dict[str, str]:
     return {
-        "GABRO_ENTRA_ISSUER": "https://login.microsoftonline.com/tenant-id/v2.0",
-        "GABRO_ENTRA_AUDIENCE": "api://broker-app-id",
-        "GABRO_ENTRA_REQUIRED_SCOPE": "Broker.Access",
-        "GABRO_ENTRA_JWKS_URL": "https://login.microsoftonline.com/tenant-id/discovery/v2.0/keys",
+        "GABRO_OIDC_ISSUER": "https://login.microsoftonline.com/tenant-id/v2.0",
+        "GABRO_OIDC_AUDIENCE": "api://broker-app-id",
+        "GABRO_OIDC_REQUIRED_SCOPE": "Broker.Access",
+        "GABRO_OIDC_JWKS_URL": "https://login.microsoftonline.com/tenant-id/discovery/v2.0/keys",
         "GABRO_UPSTREAM_BASE_URL": "https://gateway.internal.svc.cluster.local",
         "GABRO_UPSTREAM_TRUSTED_HOSTS": "gateway.internal.svc.cluster.local",
         "GABRO_POLICY_PATH": str(policy_path),
@@ -55,11 +55,11 @@ def signed_token(
 ) -> str:
     return jwt.encode(
         {
-            "iss": settings.entra.issuer,
-            "aud": settings.entra.audience,
+            "iss": settings.oidc.issuer,
+            "aud": settings.oidc.audience,
             "exp": 4_000_000_000,
             "nbf": 0,
-            "oid": "entra-oid-123",
+            "oid": "subject-123",
         },
         private_key,
         algorithm="RS256",
@@ -69,9 +69,9 @@ def signed_token(
 
 def test_rejects_missing_required_runtime_configuration(tmp_path: Path) -> None:
     environment = runtime_environment(tmp_path / "policies.json")
-    del environment["GABRO_ENTRA_AUDIENCE"]
+    del environment["GABRO_OIDC_AUDIENCE"]
 
-    with pytest.raises(RuntimeError, match="GABRO_ENTRA_AUDIENCE"):
+    with pytest.raises(RuntimeError, match="GABRO_OIDC_AUDIENCE"):
         load_runtime_settings(environment)
 
 
@@ -123,11 +123,11 @@ def test_rejects_jwks_url_that_is_not_the_issuer_tenants_entra_discovery_endpoin
     policy_path = tmp_path / "policies.json"
     policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
     environment = runtime_environment(policy_path)
-    environment["GABRO_ENTRA_JWKS_URL"] = (
+    environment["GABRO_OIDC_JWKS_URL"] = (
         "https://login.microsoftonline.com/another-tenant/discovery/v2.0/keys"
     )
 
-    with pytest.raises(RuntimeError, match="GABRO_ENTRA_JWKS_URL"):
+    with pytest.raises(RuntimeError, match="GABRO_OIDC_JWKS_URL"):
         load_runtime_settings(environment)
 
 
@@ -144,7 +144,7 @@ def test_production_jwks_verifier_does_not_indefinitely_cache_known_keys(
         return _StaticJwksClient(_SigningKey(object()))
 
     monkeypatch.setattr(runtime.jwt, "PyJWKClient", jwks_client)
-    EntraJwksVerifier(settings)
+    JwksVerifier(settings)
 
     assert captured["cache_keys"] is False
     assert captured["timeout"] == 5
@@ -159,23 +159,23 @@ def test_production_jwks_verifier_accepts_rs256_token_with_matching_verified_cla
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public_jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key()))
     signing_key = jwt.PyJWK.from_dict({**public_jwk, "kid": "ephemeral-test-key"})
-    verifier = EntraJwksVerifier(settings)
+    verifier = JwksVerifier(settings)
     verifier._jwks = _StaticJwksClient(signing_key)
     verifier.refresh()
     token = jwt.encode(
         {
-            "iss": settings.entra.issuer,
-            "aud": settings.entra.audience,
+            "iss": settings.oidc.issuer,
+            "aud": settings.oidc.audience,
             "exp": 4_000_000_000,
             "nbf": 0,
-            "oid": "entra-oid-123",
+            "oid": "subject-123",
         },
         private_key,
         algorithm="RS256",
         headers={"kid": "ephemeral-test-key"},
     )
 
-    assert verifier(token)["oid"] == "entra-oid-123"
+    assert verifier(token)["oid"] == "subject-123"
 
 
 def test_production_jwks_verifier_rejects_non_rs256_algorithm(tmp_path: Path) -> None:
@@ -183,15 +183,15 @@ def test_production_jwks_verifier_rejects_non_rs256_algorithm(tmp_path: Path) ->
     policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
     settings = load_runtime_settings(runtime_environment(policy_path))
     ephemeral_secret = secrets.token_bytes(32)
-    verifier = EntraJwksVerifier(settings)
+    verifier = JwksVerifier(settings)
     verifier._jwks = _StaticJwksClient(_SigningKey(ephemeral_secret))
     token = jwt.encode(
         {
-            "iss": settings.entra.issuer,
-            "aud": settings.entra.audience,
+            "iss": settings.oidc.issuer,
+            "aud": settings.oidc.audience,
             "exp": 4_000_000_000,
             "nbf": 0,
-            "oid": "entra-oid-123",
+            "oid": "subject-123",
         },
         ephemeral_secret,
         algorithm="HS256",
@@ -222,7 +222,7 @@ def test_rotated_signing_key_uses_one_single_flight_key_miss_refresh(
         }
     )
     jwks_client = _BlockingRotatingJwksClient(old_key, new_key)
-    verifier = EntraJwksVerifier(settings)
+    verifier = JwksVerifier(settings)
     verifier._jwks = jwks_client
     verifier.refresh()
     token = signed_token(settings, new_private_key, "new-key")
@@ -233,8 +233,8 @@ def test_rotated_signing_key_uses_one_single_flight_key_miss_refresh(
         second = executor.submit(verifier, token)
         jwks_client.allow_refresh.set()
 
-        assert first.result(timeout=2)["oid"] == "entra-oid-123"
-        assert second.result(timeout=2)["oid"] == "entra-oid-123"
+        assert first.result(timeout=2)["oid"] == "subject-123"
+        assert second.result(timeout=2)["oid"] == "subject-123"
 
     assert jwks_client.readiness_checks == 2
 
@@ -252,7 +252,7 @@ def test_repeated_unknown_signing_key_is_cooldown_limited(tmp_path: Path) -> Non
         }
     )
     jwks_client = _StaticJwksClient(known_key)
-    verifier = EntraJwksVerifier(settings)
+    verifier = JwksVerifier(settings)
     verifier._jwks = jwks_client
     verifier.refresh()
     token = signed_token(settings, unknown_private_key, "unknown-key")
@@ -345,7 +345,7 @@ def test_runtime_uses_environment_selected_server_side_key(
             "exp": 4_000_000_000,
             "nbf": 0,
             "scp": "Broker.Access",
-            "oid": "entra-oid-123",
+            "oid": "subject-123",
             "groups": ["group-research"],
         }
 
@@ -418,7 +418,7 @@ DOCUMENT_POLICIES = {
     "policies": [
         {
             "id": "cloud-platform-ai-agent",
-            "entra_group_ids": ["cf234f6f-4ea3-45bb-9747-ab7aae69894b"],
+            "group_ids": ["cf234f6f-4ea3-45bb-9747-ab7aae69894b"],
             "allowed_models": ["gpt-4o-mini"],
             "key_ref": "PLATFORM_AGENT_KEY",
             "priority": 200,
@@ -564,3 +564,94 @@ def test_readiness_reports_unavailable_when_a_projected_key_is_missing(tmp_path:
             return await client.get("/readyz")
 
     assert asyncio.run(request()).status_code == 503
+
+
+def _generic_issuer_environment(policy_path: Path) -> dict[str, str]:
+    environment = runtime_environment(policy_path)
+    environment["GABRO_OIDC_ISSUER"] = "https://idp.example.test/realms/demo"
+    environment["GABRO_OIDC_JWKS_URL"] = (
+        "https://idp.example.test/realms/demo/protocol/openid-connect/certs"
+    )
+    environment["GABRO_OIDC_SUBJECT_CLAIM"] = "sub"
+    return environment
+
+
+def test_accepts_a_non_entra_issuer_with_its_own_jwks_endpoint(tmp_path: Path) -> None:
+    """Any OIDC provider must be usable, not only Microsoft Entra."""
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+
+    settings = load_runtime_settings(_generic_issuer_environment(policy_path))
+
+    assert settings.oidc.issuer == "https://idp.example.test/realms/demo"
+    assert settings.oidc.subject_claim == "sub"
+
+
+def test_subject_claim_defaults_to_the_entra_object_id(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+
+    settings = load_runtime_settings(runtime_environment(policy_path))
+
+    assert settings.oidc.subject_claim == "oid"
+
+
+@pytest.mark.parametrize(
+    "jwks_url",
+    [
+        # A different host entirely: the whole point of the check.
+        "https://attacker.example.test/realms/demo/protocol/openid-connect/certs",
+        # Same host, but outside the issuer's own path.
+        "https://idp.example.test/realms/other/protocol/openid-connect/certs",
+        # Plaintext, so an on-path attacker could substitute signing keys.
+        "http://idp.example.test/realms/demo/protocol/openid-connect/certs",
+        # Query and fragment must not be smuggled in.
+        "https://idp.example.test/realms/demo/certs?redirect=https://attacker.example.test",
+        "https://idp.example.test/realms/demo/certs#x",
+    ],
+)
+def test_rejects_a_jwks_endpoint_that_does_not_belong_to_the_issuer(
+    tmp_path: Path, jwks_url: str
+) -> None:
+    """Signing keys decide authenticity, so their source must not be steerable."""
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = _generic_issuer_environment(policy_path)
+    environment["GABRO_OIDC_JWKS_URL"] = jwks_url
+
+    with pytest.raises(RuntimeError, match="GABRO_OIDC_JWKS_URL"):
+        load_runtime_settings(environment)
+
+
+def test_rejects_a_plaintext_issuer(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = _generic_issuer_environment(policy_path)
+    environment["GABRO_OIDC_ISSUER"] = "http://idp.example.test/realms/demo"
+
+    with pytest.raises(RuntimeError, match="GABRO_OIDC_ISSUER"):
+        load_runtime_settings(environment)
+
+
+def test_entra_issuers_keep_their_stricter_exact_jwks_rule(tmp_path: Path) -> None:
+    """Entra's discovery URL is a known constant, so same-origin is not enough."""
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = runtime_environment(policy_path)
+    environment["GABRO_OIDC_JWKS_URL"] = (
+        "https://login.microsoftonline.com/tenant-id/v2.0/keys"
+    )
+
+    with pytest.raises(RuntimeError, match="GABRO_OIDC_JWKS_URL"):
+        load_runtime_settings(environment)
+
+
+@pytest.mark.parametrize("claim", ["", "with space", "a-dash", "opt.ions", "1leading"])
+def test_rejects_a_subject_claim_that_is_not_a_plain_name(tmp_path: Path, claim: str) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = _generic_issuer_environment(policy_path)
+    environment["GABRO_OIDC_SUBJECT_CLAIM"] = claim
+
+    with pytest.raises(RuntimeError, match="GABRO_OIDC_SUBJECT_CLAIM"):
+        load_runtime_settings(environment)

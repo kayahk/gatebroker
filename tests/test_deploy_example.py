@@ -61,8 +61,8 @@ def test_example_configures_the_runtime_without_error(tmp_path: Path) -> None:
     # The example carries REPLACE placeholders and points at a projected directory
     # that only exists in-cluster. Substitute a well-formed tenant, a routable
     # upstream, and a real path; everything else is asserted as published.
-    environment["GABRO_ENTRA_ISSUER"] = f"https://login.microsoftonline.com/{tenant}/v2.0"
-    environment["GABRO_ENTRA_JWKS_URL"] = (
+    environment["GABRO_OIDC_ISSUER"] = f"https://login.microsoftonline.com/{tenant}/v2.0"
+    environment["GABRO_OIDC_JWKS_URL"] = (
         f"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys"
     )
     environment["GABRO_UPSTREAM_BASE_URL"] = "https://gateway.example.test"
@@ -75,7 +75,7 @@ def test_example_configures_the_runtime_without_error(tmp_path: Path) -> None:
     settings = load_runtime_settings(environment)
 
     assert settings.trusted_upstream_hosts == frozenset({"gateway.example.test"})
-    assert settings.entra.required_delegated_scope == environment["GABRO_ENTRA_REQUIRED_SCOPE"]
+    assert settings.oidc.required_delegated_scope == environment["GABRO_OIDC_REQUIRED_SCOPE"]
     assert settings.allow_cluster_local_plaintext_upstream is False
 
 
@@ -92,7 +92,7 @@ def test_example_policy_document_is_valid_and_secret_free() -> None:
 
     assert policies, "the example must show at least one policy"
     for policy in policies:
-        assert policy.entra_group_ids or policy.entra_app_roles
+        assert policy.group_ids or policy.app_roles
         # A policy names a key; it must never carry the value.
         assert policy.key_ref in data, (
             f"{policy.key_ref} has no matching file in the projected directory"

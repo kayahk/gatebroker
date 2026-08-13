@@ -64,9 +64,9 @@ def test_login_uses_device_flow_and_never_prints_access_token(monkeypatch) -> No
     assert "\x1b]8;;https://login.microsoft.com/device\x1b\\" in result.output
     assert "https://login.microsoft.com/device\x1b]8;;\x1b\\" in result.output
     assert "enter the code device-code" in result.output
-    assert "The device code has been copied to your clipboard. Paste it into the Entra page." in result.output
+    assert "The device code has been copied to your clipboard. Paste it into the sign-in page." in result.output
     assert copied_codes == ["device-code"]
-    assert "Opened the Entra sign-in page in your browser." in result.output
+    assert "Opened the sign-in page in your browser." in result.output
     assert opened_urls == ["https://login.microsoft.com/device"]
     assert "Authentication completed." in result.output
     assert profile.BASE_URL in result.output
@@ -320,7 +320,7 @@ def test_silent_token_acquisition_rejects_multiple_cached_accounts(monkeypatch) 
     monkeypatch.setattr(cli, "_load_cache", Mock())
     monkeypatch.setattr(cli, "_application", lambda _cache: application)
 
-    with pytest.raises(click.ClickException, match="Multiple cached Entra accounts"):
+    with pytest.raises(click.ClickException, match="Multiple cached accounts"):
         cli._acquire_access_token()
 
     application.acquire_token_silent.assert_not_called()
@@ -479,3 +479,47 @@ def test_unconfigured_distribution_refuses_to_acquire_a_token(monkeypatch) -> No
     assert result.exit_code != 0
     assert "no distribution profile" in result.output
     assert profile.BASE_URL not in result.output
+
+
+def test_entra_profile_builds_a_microsoft_authority(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(profile, "TENANT_ID", "tenant-abc")
+    monkeypatch.setattr(profile, "OIDC_AUTHORITY", "")
+    monkeypatch.setattr(
+        cli.msal, "PublicClientApplication", lambda **kwargs: captured.update(kwargs)
+    )
+
+    cli._application(cli.msal.SerializableTokenCache())
+
+    assert captured["authority"] == "https://login.microsoftonline.com/tenant-abc"
+    assert "oidc_authority" not in captured
+
+
+def test_generic_profile_builds_an_oidc_discovery_authority(monkeypatch) -> None:
+    """Any OIDC provider that advertises a device endpoint must be usable."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(profile, "TENANT_ID", "")
+    monkeypatch.setattr(profile, "OIDC_AUTHORITY", "https://idp.example.test/realms/demo")
+    monkeypatch.setattr(
+        cli.msal, "PublicClientApplication", lambda **kwargs: captured.update(kwargs)
+    )
+
+    cli._application(cli.msal.SerializableTokenCache())
+
+    assert captured["oidc_authority"] == "https://idp.example.test/realms/demo"
+    assert "authority" not in captured
+
+
+@pytest.mark.parametrize(
+    ("tenant", "authority"),
+    [("tenant-abc", "https://idp.example.test/realms/demo"), ("", "")],
+)
+def test_profile_must_name_exactly_one_identity_provider(
+    monkeypatch, tenant: str, authority: str
+) -> None:
+    """Two authorities, or none, is a configuration mistake rather than a default."""
+    monkeypatch.setattr(profile, "TENANT_ID", tenant)
+    monkeypatch.setattr(profile, "OIDC_AUTHORITY", authority)
+
+    with pytest.raises(click.ClickException, match="exactly one"):
+        cli._settings()

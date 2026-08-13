@@ -21,14 +21,14 @@ stringData:
       "policies": [
         {
           "id": "engineering",
-          "entra_group_ids": ["REPLACE_GROUP_OBJECT_ID"],
+          "group_ids": ["REPLACE_GROUP_OBJECT_ID"],
           "allowed_models": ["gpt-4o-mini", "gpt-4o"],
           "key_ref": "ENGINEERING_GATEWAY_KEY",
           "priority": 10
         },
         {
           "id": "automation",
-          "entra_app_roles": ["Broker.Access"],
+          "app_roles": ["Broker.Access"],
           "allowed_models": ["gpt-4o-mini"],
           "key_ref": "AUTOMATION_GATEWAY_KEY",
           "priority": 20

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Entra access-token claim validation behind a signature-verification boundary."""
+"""OIDC access-token claim validation behind a signature-verification boundary."""
 
 from __future__ import annotations
 
@@ -20,23 +20,27 @@ class TokenVerifier(Protocol):
 
 
 @dataclass(frozen=True)
-class EntraTokenValidationConfig:
+class TokenValidationConfig:
     issuer: str
     audience: str
     required_delegated_scope: str
     allowed_app_roles: frozenset[str]
+    # Which claim carries the stable subject identifier. Microsoft Entra puts it in
+    # `oid`, because `sub` there is pairwise per application and so is not a
+    # durable identity. Most other providers use `sub`.
+    subject_claim: str = "oid"
 
 
 @dataclass(frozen=True)
 class ValidatedIdentity:
-    oid: str
+    subject: str
     group_ids: frozenset[str]
     app_roles: frozenset[str]
 
 
 def validate_access_token(
     token: str,
-    config: EntraTokenValidationConfig,
+    config: TokenValidationConfig,
     verifier: TokenVerifier,
     *,
     now: int | float,
@@ -58,11 +62,11 @@ def validate_access_token(
     _reject_group_overage(claims)
     if not _is_authorized(claims, config):
         raise TokenValidationError("missing required authorization")
-    oid = claims.get("oid")
-    if not isinstance(oid, str) or not oid.strip():
-        raise TokenValidationError("missing oid")
+    subject = claims.get(config.subject_claim)
+    if not isinstance(subject, str) or not subject.strip():
+        raise TokenValidationError("missing subject claim")
     return ValidatedIdentity(
-        oid=oid,
+        subject=subject,
         group_ids=_string_set(claims.get("groups")),
         app_roles=_string_set(claims.get("roles")),
     )
@@ -96,7 +100,7 @@ def _reject_group_overage(claims: Mapping[str, object]) -> None:
 
 
 def _is_authorized(
-    claims: Mapping[str, object], config: EntraTokenValidationConfig
+    claims: Mapping[str, object], config: TokenValidationConfig
 ) -> bool:
     scopes = claims.get("scp")
     if isinstance(scopes, str) and config.required_delegated_scope in scopes.split():

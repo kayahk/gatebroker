@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from .entra import EntraTokenValidationConfig, TokenVerifier, validate_access_token
+from .oidc import TokenValidationConfig, TokenVerifier, validate_access_token
 from .policy import EntitlementResolutionError, load_policies, resolve_entitlement
 
 KeyResolver = Callable[[str], str]
@@ -148,7 +148,7 @@ async def _upstream_error_detail(response: httpx.Response) -> str:
 
 def create_app(
     *,
-    entra_config: EntraTokenValidationConfig,
+    oidc_config: TokenValidationConfig,
     token_verifier: TokenVerifier,
     policies_json: str,
     upstream_base_url: str,
@@ -221,7 +221,7 @@ def create_app(
             identity = await run_in_threadpool(
                 validate_access_token,
                 token,
-                entra_config,
+                oidc_config,
                 token_verifier,
                 now=time.time(),
             )
@@ -259,7 +259,7 @@ def create_app(
 
         try:
             client_ip = request.client.host if request.client is not None else ""
-            rate_limit_result = rate_limiter((identity.oid, policy.id, client_ip))
+            rate_limit_result = rate_limiter((identity.subject, policy.id, client_ip))
         except Exception as error:
             return audited_error(503, "service unavailable", "service_unavailable", policy_id=policy.id, model=model, detail=type(error).__name__)
         if rate_limit_result is False:
@@ -274,7 +274,7 @@ def create_app(
         if not isinstance(key, str) or not key:
             return audited_error(503, "service unavailable", "service_unavailable", policy_id=policy.id, model=model, detail="resolved key is empty or not a string")
 
-        upstream_body = _upstream_body(path, body, identity.oid)
+        upstream_body = _upstream_body(path, body, identity.subject)
         headers = _safe_upstream_headers(path, request)
         headers["authorization"] = f"Bearer {key}"
         headers["x-gabro-policy-id"] = policy.id

@@ -22,11 +22,11 @@ class Policy:
     """A non-secret, server-side entitlement policy."""
 
     id: str
-    entra_group_ids: frozenset[str]
+    group_ids: frozenset[str]
     allowed_models: frozenset[str]
     key_ref: str
     priority: int
-    entra_app_roles: frozenset[str] = frozenset()
+    app_roles: frozenset[str] = frozenset()
 
 
 def load_policies(document: str) -> tuple[Policy, ...]:
@@ -51,8 +51,8 @@ def _policy_from_record(record: Any) -> Policy:
         raise PolicyConfigurationError("Invalid policy record")
     try:
         policy_id = record["id"]
-        groups = record.get("entra_group_ids", [])
-        app_roles = record.get("entra_app_roles", [])
+        groups = record.get("group_ids", [])
+        app_roles = record.get("app_roles", [])
         models = record["allowed_models"]
         key_ref = record["key_ref"]
         priority = record["priority"]
@@ -62,7 +62,7 @@ def _policy_from_record(record: Any) -> Policy:
     if not isinstance(policy_id, str) or not policy_id.strip():
         raise PolicyConfigurationError("invalid policy id")
     if not _strings(groups) or not _strings(app_roles) or not (groups or app_roles):
-        raise PolicyConfigurationError("invalid policy Entra entitlements")
+        raise PolicyConfigurationError("invalid policy entitlements")
     if not _nonempty_strings(models):
         raise PolicyConfigurationError("invalid policy models")
     if not isinstance(key_ref, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key_ref):
@@ -71,11 +71,11 @@ def _policy_from_record(record: Any) -> Policy:
         raise PolicyConfigurationError("invalid policy priority")
     return Policy(
         id=policy_id.strip(),
-        entra_group_ids=frozenset(group.strip() for group in groups),
+        group_ids=frozenset(group.strip() for group in groups),
         allowed_models=frozenset(model.strip() for model in models),
         key_ref=key_ref,
         priority=priority,
-        entra_app_roles=frozenset(role.strip() for role in app_roles),
+        app_roles=frozenset(role.strip() for role in app_roles),
     )
 
 
@@ -104,8 +104,8 @@ def resolve_entitlement(
     matches = [
         policy
         for policy in policies
-        if policy.entra_group_ids.intersection(token_group_ids)
-        or policy.entra_app_roles.intersection(app_roles)
+        if policy.group_ids.intersection(token_group_ids)
+        or policy.app_roles.intersection(app_roles)
     ]
     if not matches:
         raise EntitlementResolutionError("No entitlement policy matches token claims")

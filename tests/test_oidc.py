@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from gatebroker.entra import (
-    EntraTokenValidationConfig,
+from gatebroker.oidc import (
+    TokenValidationConfig,
     TokenValidationError,
     validate_access_token,
 )
@@ -22,8 +22,8 @@ class FakeVerifier:
         return self.payload
 
 
-def config() -> EntraTokenValidationConfig:
-    return EntraTokenValidationConfig(
+def config() -> TokenValidationConfig:
+    return TokenValidationConfig(
         issuer="https://login.microsoftonline.com/tenant/v2.0",
         audience="api://gatebroker",
         required_delegated_scope="broker.access",
@@ -50,7 +50,7 @@ def test_validates_fake_verified_payload_with_required_delegated_scope() -> None
         "opaque-test-token", config(), FakeVerifier(valid_payload()), now=1_500
     )
 
-    assert identity.oid == "user-object-id"
+    assert identity.subject == "user-object-id"
     assert identity.group_ids == frozenset({"group-a"})
     assert identity.app_roles == frozenset()
 
@@ -63,7 +63,7 @@ def test_accepts_configured_audience_from_audience_list() -> None:
         now=1_500,
     )
 
-    assert identity.oid == "user-object-id"
+    assert identity.subject == "user-object-id"
     assert identity.app_roles == frozenset()
 
 
@@ -75,7 +75,7 @@ def test_accepts_configured_audience_from_audience_list() -> None:
         ({"exp": 1_500}, "expired"),
         ({"nbf": 1_501}, "not yet valid"),
         ({"scp": "profile", "roles": []}, "authorization"),
-        ({"oid": ""}, "oid"),
+        ({"oid": ""}, "missing subject claim"),
         ({"_claim_names": {"groups": "src1"}}, "overage"),
         ({"hasgroups": True}, "overage"),
     ],
@@ -147,5 +147,5 @@ def test_accepts_allowed_app_role_when_delegated_scope_is_absent() -> None:
         now=1_500,
     )
 
-    assert identity.oid == "user-object-id"
+    assert identity.subject == "user-object-id"
     assert identity.app_roles == frozenset({"Broker.Access"})

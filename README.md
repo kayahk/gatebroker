@@ -85,7 +85,7 @@ allowed models, and *names* the key it needs:
   "policies": [
     {
       "id": "engineering",
-      "entra_group_ids": ["00000000-0000-0000-0000-000000000001"],
+      "group_ids": ["00000000-0000-0000-0000-000000000001"],
       "allowed_models": ["gpt-4o-mini"],
       "key_ref": "ENGINEERING_GATEWAY_KEY",
       "priority": 10
@@ -98,10 +98,10 @@ Then run the service. It reads its configuration from the environment and refuse
 to start until everything required is present:
 
 ```shell
-export GABRO_ENTRA_ISSUER="https://login.microsoftonline.com/<tenant>/v2.0"
-export GABRO_ENTRA_AUDIENCE="<broker-application-client-id>"
-export GABRO_ENTRA_REQUIRED_SCOPE="Broker.Access"
-export GABRO_ENTRA_JWKS_URL="https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys"
+export GABRO_OIDC_ISSUER="https://login.microsoftonline.com/<tenant>/v2.0"
+export GABRO_OIDC_AUDIENCE="<broker-application-client-id>"
+export GABRO_OIDC_REQUIRED_SCOPE="Broker.Access"
+export GABRO_OIDC_JWKS_URL="https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys"
 export GABRO_POLICY_PATH="./policies.json"
 export GABRO_UPSTREAM_BASE_URL="https://your-gateway.internal"
 export GABRO_UPSTREAM_TRUSTED_HOSTS="your-gateway.internal"
@@ -191,24 +191,36 @@ limiter, and health endpoints.
 
 ## Identity providers
 
-Microsoft Entra ID is the implemented provider: token validation understands its
-claim shapes, and JWKS retrieval is pinned to the issuer tenant's own discovery
-endpoint. The `create_app` boundary itself only requires a callable that verifies a
-signature and returns verified claims, so another OIDC provider needs a verifier
-and a claim mapping rather than changes to the forwarding logic.
+Any OIDC provider that issues RS256 access tokens works: Microsoft Entra ID,
+Keycloak, Okta, Auth0, Authentik, Dex. The provider has to put group names or role
+values in a `groups` or `roles` claim, and a stable subject identifier in the claim
+named by `GABRO_OIDC_SUBJECT_CLAIM` — `oid` by default, because Entra's `sub` is
+pairwise per application and therefore not a durable identity. For most other
+providers, set it to `sub`.
+
+The JWKS endpoint has to belong to the issuer: same origin, and a path below the
+issuer's own. That constraint is deliberate, because signing keys decide whether a
+token is genuine. If the endpoint were separately steerable, anything able to set
+one environment variable could point key discovery at a key set it controls and
+mint its own tokens. Entra keeps a stricter exact rule, since its discovery URL is
+a known constant rather than something a deployment varies.
+
+The [demo](demo/) runs the whole path against Keycloak, so you can see a
+non-Microsoft provider working before committing to one.
 
 ## Configuration
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `GABRO_ENTRA_ISSUER` | yes | Expected token issuer |
-| `GABRO_ENTRA_AUDIENCE` | yes | The broker application's client id |
-| `GABRO_ENTRA_REQUIRED_SCOPE` | yes | Delegated scope a caller must hold |
-| `GABRO_ENTRA_JWKS_URL` | yes | Issuer tenant's JWKS discovery endpoint |
+| `GABRO_OIDC_ISSUER` | yes | Expected token issuer |
+| `GABRO_OIDC_AUDIENCE` | yes | The broker application's client id |
+| `GABRO_OIDC_REQUIRED_SCOPE` | yes | Delegated scope a caller must hold |
+| `GABRO_OIDC_JWKS_URL` | yes | Issuer's JWKS endpoint; must belong to the issuer |
 | `GABRO_POLICY_PATH` | yes | Path to the policy document |
 | `GABRO_UPSTREAM_BASE_URL` | yes | Gateway base URL |
 | `GABRO_UPSTREAM_TRUSTED_HOSTS` | yes | Exact allowed gateway hostnames |
-| `GABRO_ENTRA_ALLOWED_APP_ROLES` | no | App roles accepted instead of a scope |
+| `GABRO_OIDC_ALLOWED_APP_ROLES` | no | App roles accepted instead of a scope |
+| `GABRO_OIDC_SUBJECT_CLAIM` | no | Claim holding the subject id (default `oid`; use `sub` for most providers) |
 | `GABRO_KEY_DIR` | no | Read each `key_ref` from a file here instead of the environment |
 | `GABRO_RATE_LIMIT_REQUESTS` | no | Requests per window (default 60) |
 | `GABRO_RATE_LIMIT_WINDOW_SECONDS` | no | Window length (default 60) |

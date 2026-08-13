@@ -10,15 +10,15 @@ import httpx
 import pytest
 
 from gatebroker import forwarding
-from gatebroker.entra import EntraTokenValidationConfig
 from gatebroker.forwarding import _SUPPORTED_PATHS, _upstream_body, create_app
+from gatebroker.oidc import TokenValidationConfig
 
 POLICIES = '''
 {
   "policies": [
     {
       "id": "researchers",
-      "entra_group_ids": ["group-research"],
+      "group_ids": ["group-research"],
       "allowed_models": ["gpt-4o-mini"],
       "key_ref": "RESEARCHERS_KEY",
       "priority": 10
@@ -32,14 +32,14 @@ TWO_POLICIES = '''
   "policies": [
     {
       "id": "researchers",
-      "entra_group_ids": ["group-research"],
+      "group_ids": ["group-research"],
       "allowed_models": ["gpt-4o-mini"],
       "key_ref": "RESEARCHERS_KEY",
       "priority": 10
     },
     {
       "id": "operators",
-      "entra_group_ids": ["group-operators"],
+      "group_ids": ["group-operators"],
       "allowed_models": ["text-embedding-3-small"],
       "key_ref": "OPERATORS_KEY",
       "priority": 10
@@ -50,10 +50,10 @@ TWO_POLICIES = '''
 
 
 def verified_claims(token: str) -> dict[str, object]:
-    return claims_for_group("group-research", oid="entra-oid-123")
+    return claims_for_group("group-research", oid="subject-123")
 
 
-def claims_for_group(group: str, *, oid: str = "entra-oid-123") -> dict[str, object]:
+def claims_for_group(group: str, *, oid: str = "subject-123") -> dict[str, object]:
     return {
         "iss": "https://login.example.test/tenant/v2.0",
         "aud": "api://gatebroker",
@@ -65,8 +65,8 @@ def claims_for_group(group: str, *, oid: str = "entra-oid-123") -> dict[str, obj
     }
 
 
-def config() -> EntraTokenValidationConfig:
-    return EntraTokenValidationConfig(
+def config() -> TokenValidationConfig:
+    return TokenValidationConfig(
         issuer="https://login.example.test/tenant/v2.0",
         audience="api://gatebroker",
         required_delegated_scope="Broker.Access",
@@ -84,7 +84,7 @@ def app_with_upstream(
     rate_limiter: Callable[[tuple[str, str, str]], bool] | None = None,
 ):
     return create_app(
-        entra_config=config(),
+        oidc_config=config(),
         token_verifier=verifier,
         policies_json=policies,
         upstream_base_url="https://gateway.internal",
@@ -128,7 +128,7 @@ def get(app, path: str) -> httpx.Response:
 def test_rejects_untrusted_or_non_tls_upstream_destination(base_url: str) -> None:
     with pytest.raises(ValueError, match="invalid upstream base URL"):
         create_app(
-            entra_config=config(),
+            oidc_config=config(),
             token_verifier=verified_claims,
             policies_json=POLICIES,
             upstream_base_url=base_url,
@@ -155,7 +155,7 @@ def test_rejects_plaintext_upstream_unless_explicitly_cluster_local(
 ) -> None:
     with pytest.raises(ValueError, match="invalid upstream base URL"):
         create_app(
-            entra_config=config(),
+            oidc_config=config(),
             token_verifier=verified_claims,
             policies_json=POLICIES,
             upstream_base_url=base_url,
@@ -174,7 +174,7 @@ def test_forwards_via_cluster_local_plaintext_upstream_when_opted_in() -> None:
         return httpx.Response(200, json={"id": "chatcmpl-direct"})
 
     app = create_app(
-        entra_config=config(),
+        oidc_config=config(),
         token_verifier=verified_claims,
         policies_json=POLICIES,
         upstream_base_url="http://ai-gateway.ai-gateway.svc.cluster.local:4000",
@@ -243,7 +243,7 @@ def test_forwards_allowed_anthropic_message_with_server_key_and_authoritative_id
         "model": "claude-3-5-haiku",
         "max_tokens": 64,
         "messages": [{"role": "user", "content": "hi"}],
-        "metadata": {"user_id": "entra-oid-123"},
+        "metadata": {"user_id": "subject-123"},
     }
 
 
@@ -317,7 +317,7 @@ def test_forwards_anthropic_messages_streaming_to_upstream() -> None:
     assert len(upstream_requests) == 1
     assert upstream_requests[0].headers["anthropic-version"] == "2023-06-01"
     assert json.loads(upstream_requests[0].content)["stream"] is True
-    assert json.loads(upstream_requests[0].content)["metadata"] == {"user_id": "entra-oid-123"}
+    assert json.loads(upstream_requests[0].content)["metadata"] == {"user_id": "subject-123"}
 
 
 @pytest.mark.parametrize(
@@ -421,7 +421,7 @@ def test_role_only_identity_resolves_an_app_role_policy() -> None:
     policies = '''
     {"policies": [{
       "id": "automation",
-      "entra_app_roles": ["Broker.Automation"],
+      "app_roles": ["Broker.Automation"],
       "allowed_models": ["gpt-4o-mini"],
       "key_ref": "AUTOMATION_KEY",
       "priority": 10
@@ -607,7 +607,7 @@ def test_forwards_anthropic_allowed_fields_and_removes_non_allowlisted_fields() 
         "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
         "tool_choice": {"type": "auto"},
         "thinking": {"type": "enabled", "budget_tokens": 32},
-        "metadata": {"user_id": "entra-oid-123"},
+        "metadata": {"user_id": "subject-123"},
     }
 
 
@@ -631,7 +631,7 @@ def test_forwards_allowed_chat_with_server_key_and_authoritative_identity() -> N
     upstream_request = upstream_requests[0]
     assert upstream_request.url == "https://gateway.internal/v1/chat/completions"
     assert upstream_request.headers["authorization"] == "Bearer test-policy-key"
-    assert json.loads(upstream_request.content)["user"] == "entra-oid-123"
+    assert json.loads(upstream_request.content)["user"] == "subject-123"
 
 
 def test_emits_a_safe_audit_event_for_an_authorized_request(caplog: pytest.LogCaptureFixture) -> None:
@@ -655,7 +655,7 @@ def test_emits_a_safe_audit_event_for_an_authorized_request(caplog: pytest.LogCa
     assert event["model"] == "gpt-4o-mini"
     assert isinstance(event["duration_ms"], int)
     log_output = audit_records[0]
-    for prohibited_value in ("client-token", "entra-oid-123", "private prompt", "test-policy-key", "127.0.0.1"):
+    for prohibited_value in ("client-token", "subject-123", "private prompt", "test-policy-key", "127.0.0.1"):
         assert prohibited_value not in log_output
 
 
@@ -988,7 +988,7 @@ def test_rate_limiter_receives_validated_identity_policy_and_client_ip() -> None
     )
 
     assert response.status_code == 200
-    assert keys == [("entra-oid-123", "researchers", "203.0.113.7")]
+    assert keys == [("subject-123", "researchers", "203.0.113.7")]
 
 
 def test_rate_limit_rejection_denies_without_key_or_upstream_call() -> None:
@@ -1158,7 +1158,7 @@ def test_rebuilds_body_and_headers_without_client_controlled_routing_data() -> N
         "model": "gpt-4o-mini",
         "messages": [],
         "temperature": 0.4,
-        "user": "entra-oid-123",
+        "user": "subject-123",
     }
     assert upstream_request.headers["authorization"] == "Bearer test-policy-key"
     assert upstream_request.headers["x-gabro-policy-id"] == "researchers"
@@ -1505,17 +1505,17 @@ def test_responses_endpoint_is_supported() -> None:
 
 def test_responses_body_preserves_supported_fields() -> None:
     body = {'model': 'gpt-4.1-mini', 'input': 'hello', 'instructions': 'be concise', 'max_output_tokens': 32, 'stream': True}
-    assert _upstream_body('/v1/responses', body, 'entra-oid-123') == {**body, 'store': False, 'user': 'entra-oid-123'}
+    assert _upstream_body('/v1/responses', body, 'subject-123') == {**body, 'store': False, 'user': 'subject-123'}
 
 
 def test_responses_body_preserves_tool_and_reasoning_configuration() -> None:
     body = {'model': 'gpt-4.1-mini', 'input': 'hello', 'tools': [{'type': 'web_search'}], 'tool_choice': 'auto', 'parallel_tool_calls': True, 'reasoning': {'effort': 'medium'}, 'text': {'verbosity': 'low'}, 'store': False}
-    assert _upstream_body('/v1/responses', body, 'entra-oid-123') == {**body, 'store': False, 'include': ['reasoning.encrypted_content'], 'user': 'entra-oid-123'}
+    assert _upstream_body('/v1/responses', body, 'subject-123') == {**body, 'store': False, 'include': ['reasoning.encrypted_content'], 'user': 'subject-123'}
 
 
 def test_responses_body_injects_encrypted_reasoning_include_when_missing() -> None:
     body = {'model': 'gpt-5-codex', 'input': 'hello', 'reasoning': {'effort': 'high'}}
-    result = _upstream_body('/v1/responses', body, 'entra-oid-123')
+    result = _upstream_body('/v1/responses', body, 'subject-123')
     assert result['include'] == ['reasoning.encrypted_content']
     assert result['store'] is False
 
@@ -1527,7 +1527,7 @@ def test_responses_body_preserves_and_dedupes_client_include() -> None:
         'reasoning': {'effort': 'high'},
         'include': ['message.output_text.logprobs', 'reasoning.encrypted_content'],
     }
-    result = _upstream_body('/v1/responses', body, 'entra-oid-123')
+    result = _upstream_body('/v1/responses', body, 'subject-123')
     assert result['include'] == ['message.output_text.logprobs', 'reasoning.encrypted_content']
 
 
@@ -1538,13 +1538,13 @@ def test_responses_body_appends_encrypted_reasoning_to_client_include() -> None:
         'reasoning': {'effort': 'high'},
         'include': ['message.output_text.logprobs'],
     }
-    result = _upstream_body('/v1/responses', body, 'entra-oid-123')
+    result = _upstream_body('/v1/responses', body, 'subject-123')
     assert result['include'] == ['message.output_text.logprobs', 'reasoning.encrypted_content']
 
 
 def test_responses_body_leaves_include_untouched_without_reasoning() -> None:
     body = {'model': 'gpt-4.1-mini', 'input': 'hello', 'include': ['message.output_text.logprobs']}
-    result = _upstream_body('/v1/responses', body, 'entra-oid-123')
+    result = _upstream_body('/v1/responses', body, 'subject-123')
     assert result['include'] == ['message.output_text.logprobs']
     assert 'reasoning' not in result
 
@@ -1559,7 +1559,7 @@ def test_responses_body_omits_blank_description_on_builtin_computer_tool() -> No
             {"type": "computer_use", "name": "legacy_computer_use", "description": ""},
         ],
     }
-    result = _upstream_body("/v1/responses", body, "entra-oid-123")
+    result = _upstream_body("/v1/responses", body, "subject-123")
     tools = result["tools"]
     # Real built-in types (including version-suffixed aliases) drop blank descriptions.
     assert "description" not in tools[0]
@@ -1618,7 +1618,7 @@ def test_responses_body_fills_empty_tool_descriptions() -> None:
         ],
     }
 
-    assert _upstream_body("/v1/responses", body, "entra-oid-123") == {
+    assert _upstream_body("/v1/responses", body, "subject-123") == {
         "model": "gpt-4.1-mini",
         "input": "hello",
         "tools": [
@@ -1666,7 +1666,7 @@ def test_responses_body_fills_empty_tool_descriptions() -> None:
             },
         ],
         "store": False,
-        "user": "entra-oid-123",
+        "user": "subject-123",
     }
     # Shallow copies must not mutate the client-provided body.
     assert body["tools"][0]["description"] == ""
@@ -1702,7 +1702,7 @@ def test_responses_body_fills_empty_tool_descriptions_nested_under_input() -> No
         ],
     }
 
-    assert _upstream_body("/v1/responses", body, "entra-oid-123") == {
+    assert _upstream_body("/v1/responses", body, "subject-123") == {
         "model": "gpt-4.1-mini",
         "input": [
             {
@@ -1725,7 +1725,7 @@ def test_responses_body_fills_empty_tool_descriptions_nested_under_input() -> No
             }
         ],
         "store": False,
-        "user": "entra-oid-123",
+        "user": "subject-123",
     }
     assert body["input"][0]["tools"][0]["description"] == ""
     assert body["input"][0]["tools"][1]["description"] == ""
@@ -1796,7 +1796,7 @@ def test_forwards_responses_with_empty_tool_descriptions_sanitized() -> None:
             }
         ],
         "store": False,
-        "user": "entra-oid-123",
+        "user": "subject-123",
     }
 
 
@@ -1834,7 +1834,7 @@ def test_forwards_streaming_responses_with_a_bounded_body() -> None:
         "input": "hello",
         "stream": True,
         "store": False,
-        "user": "entra-oid-123",
+        "user": "subject-123",
     }
 
 

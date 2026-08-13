@@ -42,13 +42,13 @@ spec:
           env:
             # Identity provider. The JWKS URL must be the issuer tenant's own
             # discovery endpoint; the runtime rejects anything else.
-            - name: GABRO_ENTRA_ISSUER
+            - name: GABRO_OIDC_ISSUER
               value: https://login.microsoftonline.com/REPLACE_TENANT_ID/v2.0
-            - name: GABRO_ENTRA_AUDIENCE
+            - name: GABRO_OIDC_AUDIENCE
               value: REPLACE_BROKER_APPLICATION_CLIENT_ID
-            - name: GABRO_ENTRA_REQUIRED_SCOPE
+            - name: GABRO_OIDC_REQUIRED_SCOPE
               value: Broker.Access
-            - name: GABRO_ENTRA_JWKS_URL
+            - name: GABRO_OIDC_JWKS_URL
               value: https://login.microsoftonline.com/REPLACE_TENANT_ID/discovery/v2.0/keys
 
             # Entitlements. The policy document and every key it references are

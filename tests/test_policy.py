@@ -15,14 +15,14 @@ from gatebroker.policy import (
 def test_resolves_the_single_highest_priority_matching_policy() -> None:
     lower_priority = Policy(
         id="standard",
-        entra_group_ids=frozenset({"group-standard"}),
+        group_ids=frozenset({"group-standard"}),
         allowed_models=frozenset({"gpt-4o-mini"}),
         key_ref="STANDARD_KEY",
         priority=10,
     )
     higher_priority = Policy(
         id="premium",
-        entra_group_ids=frozenset({"group-premium"}),
+        group_ids=frozenset({"group-premium"}),
         allowed_models=frozenset({"gpt-4o", "gpt-4o-mini"}),
         key_ref="PREMIUM_KEY",
         priority=20,
@@ -41,7 +41,7 @@ def test_loads_non_secret_policies_from_json() -> None:
         '''
         {"policies": [{
           "id": "researchers",
-          "entra_group_ids": ["group-research"],
+          "group_ids": ["group-research"],
           "allowed_models": ["gpt-4o-mini"],
           "key_ref": "RESEARCHERS_KEY",
           "priority": 5
@@ -52,7 +52,7 @@ def test_loads_non_secret_policies_from_json() -> None:
     assert policies == (
         Policy(
             id="researchers",
-            entra_group_ids=frozenset({"group-research"}),
+            group_ids=frozenset({"group-research"}),
             allowed_models=frozenset({"gpt-4o-mini"}),
             key_ref="RESEARCHERS_KEY",
             priority=5,
@@ -65,7 +65,7 @@ def test_normalizes_policy_identifiers_and_entitlements() -> None:
         '''
         {"policies": [{
           "id": " researchers ",
-          "entra_group_ids": [" group-research "],
+          "group_ids": [" group-research "],
           "allowed_models": [" gpt-4o-mini "],
           "key_ref": "RESEARCHERS_KEY",
           "priority": 5
@@ -76,7 +76,7 @@ def test_normalizes_policy_identifiers_and_entitlements() -> None:
     assert policies == (
         Policy(
             id="researchers",
-            entra_group_ids=frozenset({"group-research"}),
+            group_ids=frozenset({"group-research"}),
             allowed_models=frozenset({"gpt-4o-mini"}),
             key_ref="RESEARCHERS_KEY",
             priority=5,
@@ -90,8 +90,8 @@ def test_normalizes_policy_identifiers_and_entitlements() -> None:
         "not-json",
         "[]",
         '{"policies": {}}',
-        '{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "lowercase_key", "priority": 1}]}',
-        '{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "UPSTREAM_KEY=reference", "priority": 1}]}',
+        '{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "lowercase_key", "priority": 1}]}',
+        '{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "UPSTREAM_KEY=reference", "priority": 1}]}',
     ],
 )
 def test_rejects_malformed_root_and_non_reference_key_values(document: str) -> None:
@@ -102,16 +102,16 @@ def test_rejects_malformed_root_and_non_reference_key_values(document: str) -> N
 @pytest.mark.parametrize(
     "record",
     [
-        {"entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1},
+        {"group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1},
         {"id": "p", "allowed_models": ["m"], "key_ref": "KEY", "priority": 1},
-        {"id": "p", "entra_group_ids": ["g"], "key_ref": "KEY", "priority": 1},
-        {"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "priority": 1},
-        {"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY"},
-        {"id": 1, "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1},
-        {"id": "p", "entra_group_ids": "g", "allowed_models": ["m"], "key_ref": "KEY", "priority": 1},
-        {"id": "p", "entra_group_ids": ["g"], "allowed_models": "m", "key_ref": "KEY", "priority": 1},
-        {"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": 1, "priority": 1},
-        {"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": True},
+        {"id": "p", "group_ids": ["g"], "key_ref": "KEY", "priority": 1},
+        {"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "priority": 1},
+        {"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY"},
+        {"id": 1, "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1},
+        {"id": "p", "group_ids": "g", "allowed_models": ["m"], "key_ref": "KEY", "priority": 1},
+        {"id": "p", "group_ids": ["g"], "allowed_models": "m", "key_ref": "KEY", "priority": 1},
+        {"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": 1, "priority": 1},
+        {"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": True},
     ],
 )
 def test_rejects_missing_or_wrong_typed_policy_fields(record: dict[str, object]) -> None:
@@ -124,12 +124,12 @@ def test_rejects_missing_or_wrong_typed_policy_fields(record: dict[str, object])
 @pytest.mark.parametrize(
     ("document", "reason"),
     [
-        ('{"policies": [{"id": "", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1}]}', "id"),
-        ('{"policies": [{"id": "p", "entra_group_ids": [], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1}]}', "entitlement"),
-        ('{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": [], "key_ref": "KEY", "priority": 1}]}', "model"),
-        ('{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "", "priority": 1}]}', "key"),
-        ('{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": "1"}]}', "priority"),
-        ('{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1}, {"id": "p", "entra_group_ids": ["g2"], "allowed_models": ["m2"], "key_ref": "KEY2", "priority": 2}]}', "duplicate"),
+        ('{"policies": [{"id": "", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1}]}', "id"),
+        ('{"policies": [{"id": "p", "group_ids": [], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1}]}', "entitlement"),
+        ('{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": [], "key_ref": "KEY", "priority": 1}]}', "model"),
+        ('{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "", "priority": 1}]}', "key"),
+        ('{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": "1"}]}', "priority"),
+        ('{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": ["m"], "key_ref": "KEY", "priority": 1}, {"id": "p", "group_ids": ["g2"], "allowed_models": ["m2"], "key_ref": "KEY2", "priority": 2}]}', "duplicate"),
     ],
 )
 def test_rejects_invalid_policy_documents(document: str, reason: str) -> None:
@@ -157,7 +157,7 @@ def test_loads_and_resolves_an_app_role_only_policy() -> None:
         '''
         {"policies": [{
           "id": "automation",
-          "entra_app_roles": ["Broker.Automation"],
+          "app_roles": ["Broker.Automation"],
           "allowed_models": ["gpt-4o-mini"],
           "key_ref": "AUTOMATION_KEY",
           "priority": 20
@@ -176,7 +176,7 @@ def test_loads_and_resolves_an_app_role_only_policy() -> None:
 
 def test_loads_a_source_neutral_key_reference() -> None:
     policies = load_policies(
-        '{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"],'
+        '{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": ["m"],'
         ' "key_ref": "UPSTREAM_API_KEY_P", "priority": 1}]}'
     )
 
@@ -186,7 +186,7 @@ def test_loads_a_source_neutral_key_reference() -> None:
 def test_key_reference_names_a_value_the_deployment_resolves() -> None:
     """A policy carries the name of a key, never the key itself."""
     policies = load_policies(
-        '{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"],'
+        '{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": ["m"],'
         ' "key_ref": "UPSTREAM_API_KEY", "priority": 1}]}'
     )
 
@@ -196,6 +196,6 @@ def test_key_reference_names_a_value_the_deployment_resolves() -> None:
 def test_rejects_a_policy_without_a_key_reference() -> None:
     with pytest.raises(PolicyConfigurationError, match="Invalid policy record"):
         load_policies(
-            '{"policies": [{"id": "p", "entra_group_ids": ["g"], "allowed_models": ["m"],'
+            '{"policies": [{"id": "p", "group_ids": ["g"], "allowed_models": ["m"],'
             ' "priority": 1}]}'
         )

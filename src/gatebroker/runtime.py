@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from collections.abc import Mapping
 from contextlib import suppress
@@ -13,15 +14,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition, Lock
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 import httpx
 import jwt
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from .entra import EntraTokenValidationConfig, TokenVerifier
 from .forwarding import KeyResolver, RateLimiter, RateLimitKey, create_app
+from .oidc import TokenValidationConfig, TokenVerifier
 from .policy import load_policies
 
 _JWKS_REFRESH_SECONDS = 300
@@ -35,7 +36,7 @@ _LOGGER = logging.getLogger("uvicorn.error")
 class RuntimeSettings:
     """Non-secret broker runtime configuration supplied by the deployment."""
 
-    entra: EntraTokenValidationConfig
+    oidc: TokenValidationConfig
     jwks_url: str
     policies_json: str
     upstream_base_url: str
@@ -50,11 +51,11 @@ class RuntimeSettings:
 def load_runtime_settings(environment: Mapping[str, str] | None = None) -> RuntimeSettings:
     """Load and validate all configuration required before accepting traffic."""
     values = os.environ if environment is None else environment
-    issuer = _required(values, "GABRO_ENTRA_ISSUER")
-    audience = _required(values, "GABRO_ENTRA_AUDIENCE")
-    required_scope = _required(values, "GABRO_ENTRA_REQUIRED_SCOPE")
-    jwks_url = _required(values, "GABRO_ENTRA_JWKS_URL")
-    _validate_entra_jwks_url(issuer, jwks_url)
+    issuer = _required(values, "GABRO_OIDC_ISSUER")
+    audience = _required(values, "GABRO_OIDC_AUDIENCE")
+    required_scope = _required(values, "GABRO_OIDC_REQUIRED_SCOPE")
+    jwks_url = _required(values, "GABRO_OIDC_JWKS_URL")
+    _validate_jwks_url(issuer, jwks_url)
     policy_path = Path(_required(values, "GABRO_POLICY_PATH"))
     upstream_base_url = _required(values, "GABRO_UPSTREAM_BASE_URL")
     trusted_hosts = frozenset(
@@ -69,11 +70,12 @@ def load_runtime_settings(environment: Mapping[str, str] | None = None) -> Runti
     except OSError as error:
         raise RuntimeError("GABRO_POLICY_PATH is unreadable") from error
     return RuntimeSettings(
-        entra=EntraTokenValidationConfig(
+        oidc=TokenValidationConfig(
             issuer=issuer,
             audience=audience,
             required_delegated_scope=required_scope,
-            allowed_app_roles=frozenset(_csv(values.get("GABRO_ENTRA_ALLOWED_APP_ROLES", ""))),
+            allowed_app_roles=frozenset(_csv(values.get("GABRO_OIDC_ALLOWED_APP_ROLES", ""))),
+            subject_claim=_claim_name(values.get("GABRO_OIDC_SUBJECT_CLAIM", "oid")),
         ),
         jwks_url=jwks_url,
         policies_json=policies_json,
@@ -126,11 +128,11 @@ def build_key_resolver(settings: RuntimeSettings) -> KeyResolver:
     return resolve
 
 
-class EntraJwksVerifier:
+class JwksVerifier:
     """Verify JWTs against a JWKS snapshot refreshed outside request handling."""
 
     def __init__(self, settings: RuntimeSettings) -> None:
-        self._config = settings.entra
+        self._config = settings.oidc
         self._jwks = jwt.PyJWKClient(
             settings.jwks_url,
             cache_keys=False,
@@ -158,7 +160,9 @@ class EntraJwksVerifier:
             algorithms=["RS256"],
             audience=self._config.audience,
             issuer=self._config.issuer,
-            options={"require": ["exp", "nbf", "iss", "aud", "oid"]},
+            options={
+                "require": ["exp", "nbf", "iss", "aud", self._config.subject_claim]
+            },
         )
         return claims
 
@@ -208,7 +212,7 @@ class EntraJwksVerifier:
         try:
             keys = self._fetch_keys()
         except RuntimeError:
-            _LOGGER.warning("Entra JWKS key-miss refresh failed")
+            _LOGGER.warning("JWKS key-miss refresh failed")
         finally:
             self._complete_refresh(keys)
 
@@ -245,7 +249,7 @@ class EntraJwksVerifier:
             try:
                 await asyncio.to_thread(self.refresh)
             except RuntimeError:
-                _LOGGER.exception("Entra JWKS refresh failed")
+                _LOGGER.exception("JWKS refresh failed")
 
     def is_ready(self) -> bool:
         with self._condition:
@@ -289,12 +293,12 @@ def create_runtime_app(
     key_resolver: KeyResolver | None = None,
 ) -> FastAPI:
     """Build the production ASGI app and non-sensitive liveness/readiness endpoints."""
-    verifier = token_verifier or EntraJwksVerifier(settings)
+    verifier = token_verifier or JwksVerifier(settings)
     policies = load_policies(settings.policies_json)
     required_keys = frozenset(policy.key_ref for policy in policies)
     resolve_key = key_resolver or build_key_resolver(settings)
     app = create_app(
-        entra_config=settings.entra,
+        oidc_config=settings.oidc,
         token_verifier=verifier,
         policies_json=settings.policies_json,
         upstream_base_url=settings.upstream_base_url,
@@ -310,7 +314,7 @@ def create_runtime_app(
         transport=transport,
     )
 
-    if isinstance(verifier, EntraJwksVerifier):
+    if isinstance(verifier, JwksVerifier):
         refresh_task: asyncio.Task[None] | None = None
 
         async def start_jwks_refresh() -> None:
@@ -344,7 +348,7 @@ def create_runtime_app(
 
     @app.get("/readyz")
     async def readiness() -> JSONResponse:
-        verifier_ready = not isinstance(verifier, EntraJwksVerifier) or verifier.is_ready()
+        verifier_ready = not isinstance(verifier, JwksVerifier) or verifier.is_ready()
         if not verifier_ready or not keys_are_resolvable():
             return JSONResponse({"status": "unavailable"}, status_code=503)
         return JSONResponse({"status": "ok"})
@@ -363,25 +367,60 @@ def _csv(value: str) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
-def _validate_entra_jwks_url(issuer: str, jwks_url: str) -> None:
-    """Allow only the issuer tenant's canonical Entra v2 JWKS discovery URL."""
+def _claim_name(value: str) -> str:
+    """Accept only a plain claim name, so it cannot smuggle in JWT decode options."""
+    name = value.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise RuntimeError("GABRO_OIDC_SUBJECT_CLAIM must be a plain claim name")
+    return name
+
+
+_ENTRA_HOST = "login.microsoftonline.com"
+
+
+def _validate_jwks_url(issuer: str, jwks_url: str) -> None:
+    """Require the JWKS endpoint to belong to the configured issuer.
+
+    Signing keys decide whether a token is genuine, so the endpoint they come from
+    must not be separately steerable. If it were, anything able to set one
+    environment variable could point key discovery at a key set it controls and
+    mint its own tokens. Tying the JWKS URL to the issuer removes that lever.
+
+    Microsoft Entra keeps its stricter, exact rule because its discovery URL is a
+    known constant rather than something a deployment may vary.
+    """
     parsed_issuer = urlsplit(issuer)
     if (
         parsed_issuer.scheme != "https"
-        or parsed_issuer.netloc != "login.microsoftonline.com"
+        or not parsed_issuer.netloc
         or parsed_issuer.query
         or parsed_issuer.fragment
     ):
-        raise RuntimeError("GABRO_ENTRA_ISSUER must be an Entra v2 issuer URL")
+        raise RuntimeError("GABRO_OIDC_ISSUER must be an https URL without query or fragment")
+
+    if parsed_issuer.netloc == _ENTRA_HOST:
+        _validate_entra_jwks_url(parsed_issuer, jwks_url)
+        return
+
+    parsed_jwks = urlsplit(jwks_url)
+    if parsed_jwks.scheme != "https" or parsed_jwks.query or parsed_jwks.fragment:
+        raise RuntimeError("GABRO_OIDC_JWKS_URL must be an https URL without query or fragment")
+    if parsed_jwks.netloc != parsed_issuer.netloc:
+        raise RuntimeError("GABRO_OIDC_JWKS_URL must have the same origin as GABRO_OIDC_ISSUER")
+    issuer_path = parsed_issuer.path.rstrip("/")
+    if issuer_path and not parsed_jwks.path.startswith(f"{issuer_path}/"):
+        raise RuntimeError("GABRO_OIDC_JWKS_URL must be a path below GABRO_OIDC_ISSUER")
+
+
+def _validate_entra_jwks_url(parsed_issuer: SplitResult, jwks_url: str) -> None:
+    """Allow only the issuer tenant's canonical Entra v2 JWKS discovery URL."""
     issuer_parts = parsed_issuer.path.split("/")
     if len(issuer_parts) != 3 or not issuer_parts[1] or issuer_parts[2] != "v2.0":
-        raise RuntimeError("GABRO_ENTRA_ISSUER must be an Entra v2 issuer URL")
-    expected = (
-        f"https://login.microsoftonline.com/{issuer_parts[1]}/discovery/v2.0/keys"
-    )
+        raise RuntimeError("GABRO_OIDC_ISSUER must be an Entra v2 issuer URL")
+    expected = f"https://{_ENTRA_HOST}/{issuer_parts[1]}/discovery/v2.0/keys"
     if jwks_url != expected:
         raise RuntimeError(
-            "GABRO_ENTRA_JWKS_URL must be the configured issuer tenant's Entra discovery endpoint"
+            "GABRO_OIDC_JWKS_URL must be the configured issuer tenant's Entra discovery endpoint"
         )
 
 

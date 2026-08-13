@@ -54,7 +54,7 @@ broker out of service rather than silently denying a subset of users, which is
 deliberate: a policy that half-exists is not a policy.
 
 **Every request returns 401.** The token is being rejected before entitlement
-selection. Check that `GABRO_ENTRA_AUDIENCE` is the broker application's client
+selection. Check that `GABRO_OIDC_AUDIENCE` is the broker application's client
 id — not its identifier URI, which is the *scope* prefix and is a common
 mix-up — and that the issuer matches the tenant that minted the token.
 

@@ -48,6 +48,11 @@ def _settings() -> tuple[str, str, str, str]:
             "This build has no distribution profile. Set the values in "
             "gatebroker/profile.py and mark it CONFIGURED before signing a release."
         )
+    if bool(profile.TENANT_ID) == bool(profile.OIDC_AUTHORITY):
+        raise click.ClickException(
+            "Set exactly one of TENANT_ID (Microsoft Entra) or OIDC_AUTHORITY "
+            "(any other OIDC provider) in gatebroker/profile.py."
+        )
     return profile.TENANT_ID, profile.CLIENT_ID, profile.SCOPE, profile.BASE_URL
 
 
@@ -216,9 +221,18 @@ def _save_cache(cache: msal.SerializableTokenCache) -> None:
 
 def _application(cache: msal.SerializableTokenCache) -> msal.PublicClientApplication:
     tenant_id, client_id, _scope, _base_url = _settings()
+    if tenant_id:
+        return msal.PublicClientApplication(
+            client_id=client_id,
+            authority=f"https://login.microsoftonline.com/{tenant_id}",
+            token_cache=cache,
+        )
+    # A non-Microsoft provider is reached through OIDC discovery rather than the
+    # Entra authority, so its device authorization endpoint is taken from the
+    # issuer's own metadata.
     return msal.PublicClientApplication(
         client_id=client_id,
-        authority=f"https://login.microsoftonline.com/{tenant_id}",
+        oidc_authority=profile.OIDC_AUTHORITY,
         token_cache=cache,
     )
 
@@ -270,13 +284,13 @@ def _device_login_url(flow: dict[str, object]) -> str | None:
 
 
 def _device_code_instructions(flow: dict[str, object]) -> str:
-    """Format an explicit terminal hyperlink for the Entra device-code flow."""
+    """Format an explicit terminal hyperlink for the device-code flow."""
     verification_uri = _device_login_url(flow)
     user_code = flow.get("user_code")
     if isinstance(verification_uri, str) and isinstance(user_code, str) and user_code:
         return f"To sign in, open {_terminal_hyperlink(verification_uri)} in your browser and enter the code {user_code}."
 
-    raise click.ClickException("Unable to start Entra device-code sign-in.")
+    raise click.ClickException("Unable to start device-code sign-in.")
 
 
 def _device_code_login() -> None:
@@ -288,7 +302,7 @@ def _device_code_login() -> None:
     click.echo(_device_code_instructions(flow))
     user_code = flow.get("user_code")
     if isinstance(user_code, str) and _copy_device_code(user_code):
-        click.echo("The device code has been copied to your clipboard. Paste it into the Entra page.")
+        click.echo("The device code has been copied to your clipboard. Paste it into the sign-in page.")
     verification_uri = _device_login_url(flow)
     if verification_uri is not None:
         try:
@@ -296,10 +310,10 @@ def _device_code_login() -> None:
         except Exception:
             opened = False
         if opened:
-            click.echo("Opened the Entra sign-in page in your browser.")
+            click.echo("Opened the sign-in page in your browser.")
     result = application.acquire_token_by_device_flow(flow)
     if "access_token" not in result:
-        raise click.ClickException("Entra device-code sign-in did not complete successfully.")
+        raise click.ClickException("Device-code sign-in did not complete successfully.")
     _save_cache(cache)
     click.echo(f"Authentication completed. You can direct your agent at {base_url}")
 
@@ -311,7 +325,7 @@ def _acquire_access_token() -> str:
     accounts = application.get_accounts()
     if len(accounts) > 1:
         raise click.ClickException(
-            "Multiple cached Entra accounts were found; run gabro logout, then login."
+            "Multiple cached accounts were found; run gabro logout, then login."
         )
     if accounts:
         result = application.acquire_token_silent(scopes=[scope], account=accounts[0])
@@ -345,7 +359,7 @@ def _configure_local_agent(agent: str, command: Sequence[str], *, reset: bool) -
 @main.command()
 @click.argument("agent", required=False)
 def login(agent: str | None) -> None:
-    """Sign in with Entra device code and save sanitized refresh state in the OS credential store.
+    """Sign in by device code and save sanitized refresh state in the OS credential store.
 
     When AGENT is provided, also save a launcher profile equivalent to
     `gabro configure AGENT -- AGENT` and immediately start it with an

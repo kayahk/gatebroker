@@ -15,7 +15,13 @@ unconfigured build can never send a credential to the example endpoint.
 from __future__ import annotations
 
 # Identity provider and gateway coordinates.
+#
+# For Microsoft Entra, set TENANT_ID and leave OIDC_AUTHORITY empty. For any other
+# OIDC provider, leave TENANT_ID empty and set OIDC_AUTHORITY to the issuer URL
+# whose /.well-known/openid-configuration advertises a device authorization
+# endpoint; the device-code flow needs one.
 TENANT_ID = "00000000-0000-0000-0000-000000000000"
+OIDC_AUTHORITY = ""
 CLIENT_ID = "00000000-0000-0000-0000-000000000000"
 SCOPE = "api://gatebroker.invalid/access_as_user"
 BASE_URL = "https://gateway.gatebroker.invalid/v1"
