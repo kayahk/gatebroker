@@ -3,11 +3,18 @@
 # identity (Keycloak) -> gatebroker -> gateway (LiteLLM) -> mock model provider
 #
 # Nothing here reaches the internet at run time and no provider account is needed.
+#
+# Every service shares one network namespace, so `localhost` means the same thing to
+# your browser and to every container. That matters because tokens carry the issuer
+# that minted them and the broker validates it: with separate namespaces there is no
+# single address that both a browser on the host and the broker in a container can
+# use, and the demo would need a hosts-file entry. This is the same arrangement as a
+# Kubernetes pod. It is a convenience for the demo only; deploy/ shows services
+# addressing each other by name, which is what a real deployment does.
 name: gatebroker-demo
 
 services:
-  # The identity provider, standing in for Entra, Okta, or Auth0. Seeded with three
-  # users in different groups so entitlement resolution is observable.
+  # Holds the shared network namespace, so the published ports live here.
   keycloak:
     image: quay.io/keycloak/keycloak:26.3
     command:
@@ -19,43 +26,44 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
       # Tokens carry this as `iss`, and the broker validates the issuer and requires
-      # the JWKS endpoint to share its origin. Every party therefore has to reach
-      # Keycloak by this one name -- containers through Compose DNS, and your browser
-      # or the gabro CLI through a hosts-file entry (see README). Serving the admin
-      # console under a second name does not work: the console is a browser app that
-      # authenticates against the master realm, so it would still be sent here.
-      KC_HOSTNAME: https://keycloak:8443
-      KC_HTTP_ENABLED: "false"
+      # the JWKS endpoint to share its origin. One address for everyone.
+      KC_HOSTNAME: https://localhost:8443
+      # A plaintext listener bound inside the namespace, used only by the health
+      # check below: this image ships no HTTP client, and its management port
+      # inherits TLS, so a shell probe cannot speak to it. Not published.
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "9080"
+      JAVA_OPTS_APPEND: -Xms64m -Xmx512m
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
       - ./tls:/etc/tls:ro
     ports:
-      - "8443:8443"
-
-  # Gates the broker on the two things it actually needs, since Keycloak's own
-  # health port inherits TLS and its image carries no HTTP client.
-  services-ready:
-    image: python:3.11-slim
-    command: ["python", "/srv/wait-for-services.py"]
-    environment:
-      SSL_CERT_FILE: /etc/demo-tls/ca.pem
-    volumes:
-      - ./wait:/srv:ro
-      - ./tls:/etc/demo-tls:ro
-    depends_on:
-      keycloak:
-        condition: service_started
-      litellm:
-        condition: service_started
-      mock-model:
-        condition: service_healthy
+      - "8443:8443"  # identity provider
+      - "8080:8080"  # the broker, which shares this namespace
+    healthcheck:
+      # Ready when the demo realm's discovery document is served, which is exactly
+      # what the broker needs, rather than a generic "the process is up".
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9080 &&
+          printf 'GET /realms/gatebroker-demo/.well-known/openid-configuration HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"issuer"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 15s
 
   # Stands in for a real model provider so the demo needs no API key.
   mock-model:
     image: python:3.11-slim
+    network_mode: "service:keycloak"
     command: ["python", "/srv/server.py"]
     volumes:
       - ./mock-model:/srv:ro
+    depends_on:
+      keycloak:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8081/health').read()"]
       interval: 5s
@@ -66,6 +74,7 @@ services:
   # broker's upstream contract without a production split deployment.
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
+    network_mode: "service:keycloak"
     command:
       - --config
       - /etc/litellm/config.yaml
@@ -84,15 +93,29 @@ services:
     depends_on:
       mock-model:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import ssl, urllib.request
+          context = ssl.create_default_context(cafile="/etc/tls/ca.pem")
+          urllib.request.urlopen("https://localhost:4000/health/liveliness", context=context, timeout=5).read()
+      interval: 5s
+      timeout: 6s
+      retries: 40
+      start_period: 15s
 
   # The component under demonstration, built from this repository.
   gatebroker:
     build:
       context: ..
       dockerfile: Dockerfile
+    network_mode: "service:keycloak"
     environment:
-      GABRO_OIDC_ISSUER: https://keycloak:8443/realms/gatebroker-demo
-      GABRO_OIDC_JWKS_URL: https://keycloak:8443/realms/gatebroker-demo/protocol/openid-connect/certs
+      GABRO_OIDC_ISSUER: https://localhost:8443/realms/gatebroker-demo
+      GABRO_OIDC_JWKS_URL: https://localhost:8443/realms/gatebroker-demo/protocol/openid-connect/certs
       GABRO_OIDC_AUDIENCE: gatebroker-api
       GABRO_OIDC_REQUIRED_SCOPE: broker
       # Keycloak spells granted scopes `scope` and the subject `sub`; Entra uses
@@ -102,8 +125,8 @@ services:
       GABRO_OIDC_ALLOWED_APP_ROLES: broker-automation
       GABRO_POLICY_PATH: /etc/gatebroker/policies.json
       GABRO_KEY_DIR: /etc/gatebroker
-      GABRO_UPSTREAM_BASE_URL: https://litellm:4000
-      GABRO_UPSTREAM_TRUSTED_HOSTS: litellm
+      GABRO_UPSTREAM_BASE_URL: https://localhost:4000
+      GABRO_UPSTREAM_TRUSTED_HOSTS: localhost
       GABRO_RATE_LIMIT_REQUESTS: "30"
       GABRO_RATE_LIMIT_WINDOW_SECONDS: "60"
       # Both the JWKS fetch and the upstream call must trust the demo CA. The
@@ -113,24 +136,24 @@ services:
     volumes:
       - ./entitlements:/etc/gatebroker:ro
       - ./tls:/etc/gatebroker-tls:ro
-    ports:
-      - "8080:8080"
     depends_on:
-      services-ready:
-        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
     healthcheck:
       # Ready only once the JWKS snapshot is fresh and every policy key resolves.
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/readyz').read()"]
       interval: 5s
       timeout: 3s
       retries: 40
-      start_period: 10s
+      start_period: 5s
 
-  # Drives the walkthrough from inside the network, where the demo CA is trusted
-  # and `keycloak` resolves. Does not run unless asked for by profile.
+  # Drives the walkthrough. Does not run unless asked for by profile.
   smoke:
     image: python:3.11-slim
     profiles: ["smoke"]
+    network_mode: "service:keycloak"
     command: ["python", "/srv/smoke.py"]
     environment:
       SSL_CERT_FILE: /etc/demo-tls/ca.pem

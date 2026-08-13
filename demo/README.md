@@ -50,21 +50,13 @@ groups, and no match means denial rather than a default.
 
 ## Trying it by hand
 
-With the stack up, get a token and call the broker:
+With the stack up, everything is reachable from your machine directly. Get a token
+and call the broker:
 
 ```shell
-token=$(docker compose exec -T gatebroker python - <<'PY'
-import json, urllib.parse, urllib.request
-data = urllib.parse.urlencode({
-    "grant_type": "password", "client_id": "gabro-cli",
-    "username": "alice", "password": "demo", "scope": "openid broker",
-}).encode()
-request = urllib.request.Request(
-    "https://keycloak:8443/realms/gatebroker-demo/protocol/openid-connect/token",
-    data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
-print(json.load(urllib.request.urlopen(request))["access_token"])
-PY
-)
+token=$(curl -sk https://localhost:8443/realms/gatebroker-demo/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=gabro-cli \
+  -d username=alice -d password=demo -d 'scope=openid broker' | jq -r .access_token)
 
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer ${token}" \
@@ -72,56 +64,52 @@ curl -s http://localhost:8080/v1/chat/completions \
   -d '{"model":"demo-large","messages":[{"role":"user","content":"hello"}]}' | jq .
 ```
 
+`curl -sk` skips verification of the demo's own certificate, which is fine for poking
+around; the broker itself verifies it properly against the demo CA.
+
 Swap `demo-large` for `demo-small` as `bob`, or try `carol`, to watch entitlement
 resolution refuse the call.
 
-To browse the identity provider, see the one-line hosts entry below.
+The Keycloak admin console is at <https://localhost:8443/admin> (`admin`/`admin`).
+Your browser will warn about the demo's own certificate; accept it and continue.
 
-## One name for Keycloak
+## Everything on localhost, and why
 
-Everything addresses Keycloak as `keycloak:8443`. Containers resolve it through
-Compose DNS. To reach it from your own machine — for the admin console or the `gabro`
-CLI — map the name once:
+There is nothing to configure: no hosts file, no DNS, no sudo. Every service shares a
+single network namespace, so `localhost` means the same thing to your browser and to
+every container, the same way it does inside a Kubernetes pod.
 
-```shell
-echo '127.0.0.1 keycloak' | sudo tee -a /etc/hosts
-```
+That is worth the slightly unusual arrangement because tokens carry the issuer that
+minted them, the broker validates it, and the JWKS endpoint must share its origin. With
+separate namespaces there is simply no address that both a browser on the host and the
+broker in a container can use for the same Keycloak, and two attempts to work around
+that both failed — the second in a particularly unhelpful way:
 
-Then the console is at <https://keycloak:8443> (`admin`/`admin`). Your browser will
-warn about the demo's own certificate; accept it and continue.
-
-**The end-to-end checks need none of this.** They run inside the network, where the
-name already resolves, so `./run.sh` works on a clean machine. The script tells you
-which situation you are in.
-
-Using one name is not incidental. Tokens carry the issuer that minted them, the broker
-validates it, and the JWKS endpoint must share its origin — so every party has to agree
-on a single name. Two earlier attempts to avoid the hosts entry both failed, and the
-second failed in an especially unhelpful way:
-
-- Pinning the server to `keycloak` while serving the console under `localhost` looks
-  right, but the console is a browser application that authenticates against the
-  *master* realm, and that realm still pointed at `keycloak`. The page loaded and then
-  died with "Something went wrong" and nothing in the server log, because the failing
-  request never left the browser.
+- Pinning the server to a container-only name while serving the console under
+  `localhost` looks right, but the console is a browser application that authenticates
+  against the *master* realm, and that realm still pointed at the container-only name.
+  The page loaded and then died with "Something went wrong" and nothing in the server
+  log, because the failing request never left the browser.
 - Letting the issuer follow the request host fixes the console and breaks the broker:
-  tokens fetched through `localhost` carry an issuer it rejects.
+  tokens fetched through one name carry an issuer it rejects.
 
-If you ever change the hostname here, check `authServerUrl` in the console's embedded
-`environment` block, not just whether the page loads. That is the value the browser
+The cost is that this demo does not model production networking, where services address
+each other by distinct names. [`deploy/`](../deploy/) is the reference for that.
+
+If you change the addressing here, check `authServerUrl` in the console's embedded
+`environment` block rather than whether the page loads. That is the value the browser
 authenticates against, and it is where both attempts went wrong.
 
 ## Using the `gabro` CLI against the demo
 
 The automated checks use the password grant so they need no human at a browser. To
-drive the real device-code flow instead, point a local build at the demo realm. This
-needs the hosts entry from above, since the CLI acquires real tokens.
+drive the real device-code flow instead, point a local build at the demo realm.
 
 Set the distribution profile in `src/gatebroker/profile.py`:
 
 ```python
 TENANT_ID = ""
-OIDC_AUTHORITY = "https://keycloak:8443/realms/gatebroker-demo"
+OIDC_AUTHORITY = "https://localhost:8443/realms/gatebroker-demo"
 CLIENT_ID = "gabro-cli"
 SCOPE = "openid broker"
 BASE_URL = "http://localhost:8080/v1"

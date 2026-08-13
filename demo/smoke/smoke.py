@@ -20,9 +20,9 @@ from typing import Any
 
 # nosec B105: an endpoint URL, not a credential; the name merely contains "TOKEN".
 KEYCLOAK_TOKEN_URL = (
-    "https://keycloak:8443/realms/gatebroker-demo/protocol/openid-connect/token"  # nosec B105
+    "https://localhost:8443/realms/gatebroker-demo/protocol/openid-connect/token"  # nosec B105
 )
-BROKER = "http://gatebroker:8080"
+BROKER = "http://localhost:8080"
 CLIENT_ID = "gabro-cli"
 PASSWORD = "demo"  # nosec B105: the demo realm's throwaway password
 

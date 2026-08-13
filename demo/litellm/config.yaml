@@ -1,5 +1,8 @@
 # LiteLLM configuration for the demo.
 #
+# The provider is on localhost because every demo service shares one network
+# namespace, so that name reaches the mock provider. See docker-compose.yml.
+#
 # Both models point at the mock provider, so the demo needs no provider account and
 # makes no outbound calls. Swap `api_base` and `api_key` for a real provider and the
 # rest of the demo is unchanged.
@@ -7,12 +10,12 @@ model_list:
   - model_name: demo-small
     litellm_params:
       model: openai/demo-small
-      api_base: http://mock-model:8081/v1
+      api_base: http://localhost:8081/v1
       api_key: mock-provider-key-not-a-secret
   - model_name: demo-large
     litellm_params:
       model: openai/demo-large
-      api_base: http://mock-model:8081/v1
+      api_base: http://localhost:8081/v1
       api_key: mock-provider-key-not-a-secret
 
 general_settings:
