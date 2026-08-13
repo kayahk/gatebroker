@@ -109,6 +109,25 @@ repository root:
 ```shell
 export GABRO_DEV_PROFILE="$PWD/demo/gabro-dev-profile.json"
 uv run gabro login
+```
+
+`login` prints a URL and a code. Open it and sign in as **`alice`** with password
+**`demo`** — one of the realm users from the table above, not the `admin` account, which
+belongs to the admin console in a different realm. Sign in as `bob` or `carol` instead to
+watch the broker refuse a model or an identity that resolves to no policy.
+
+Then start something through the gateway. If you do not have an OpenAI-compatible agent
+to hand, a shell is enough to see it working: `exec` puts the endpoint and a short-lived
+token in the child process, and nowhere else.
+
+```shell
+uv run gabro exec -- sh -c 'curl -s "$OPENAI_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"demo-small\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"'
+```
+
+```shell
 uv run gabro exec -- your-openai-compatible-client
 ```
 
