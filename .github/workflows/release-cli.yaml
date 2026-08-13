@@ -65,6 +65,11 @@ jobs:
                   'gatebroker/profile.py is still the placeholder. Set your tenant, '
                   'client, scope, gateway URL and models, then set CONFIGURED = True.'
               )
+          if profile.DEVELOPMENT:
+              sys.exit(
+                  'This build is configured by GABRO_DEV_PROFILE. A release must have '
+                  'its coordinates in source, not in a file supplied at build time.'
+              )
           "
 
       - name: Assert Apple Silicon runner

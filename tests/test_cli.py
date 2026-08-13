@@ -523,3 +523,100 @@ def test_profile_must_name_exactly_one_identity_provider(
 
     with pytest.raises(click.ClickException, match="exactly one"):
         cli._settings()
+
+
+def _write_dev_profile(tmp_path, **overrides) -> str:
+    document = {
+        "oidc_authority": "https://idp.example.test/realms/demo",
+        "client_id": "dev-client",
+        "scope": "openid broker",
+        "base_url": "http://localhost:8080/v1",
+        "models": [["demo-small", "Demo small"]],
+    }
+    document.update(overrides)
+    path = tmp_path / "dev-profile.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return str(path)
+
+
+def _reload_profile(monkeypatch, location: str | None):
+    import importlib
+
+    if location is None:
+        monkeypatch.delenv("GABRO_DEV_PROFILE", raising=False)
+    else:
+        monkeypatch.setenv("GABRO_DEV_PROFILE", location)
+    return importlib.reload(profile)
+
+
+def test_a_development_profile_configures_an_unconfigured_build(monkeypatch, tmp_path) -> None:
+    """Trying the demo must not require editing tracked source."""
+    reloaded = _reload_profile(monkeypatch, _write_dev_profile(tmp_path))
+    try:
+        assert reloaded.CONFIGURED is True
+        assert reloaded.DEVELOPMENT is True
+        assert reloaded.OIDC_AUTHORITY == "https://idp.example.test/realms/demo"
+        assert reloaded.default_model() == "demo-small"
+    finally:
+        _reload_profile(monkeypatch, None)
+
+
+def test_a_configured_distribution_ignores_the_development_profile(monkeypatch, tmp_path) -> None:
+    """The whole point of compiling coordinates in is that they cannot be redirected."""
+    location = _write_dev_profile(
+        tmp_path, base_url="https://attacker.example/v1", oidc_authority="https://attacker.example"
+    )
+    monkeypatch.setattr(profile, "CONFIGURED", True)
+    monkeypatch.setenv("GABRO_DEV_PROFILE", location)
+
+    profile._apply_development_profile()
+
+    assert profile.BASE_URL != "https://attacker.example/v1"
+    assert profile.DEVELOPMENT is False
+
+
+def test_an_unconfigured_build_without_a_development_profile_still_refuses(monkeypatch) -> None:
+    reloaded = _reload_profile(monkeypatch, None)
+    try:
+        assert reloaded.CONFIGURED is False
+        assert reloaded.DEVELOPMENT is False
+    finally:
+        _reload_profile(monkeypatch, None)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"models": []},
+        {"models": "demo-small"},
+        {"tenant_id": "t"},
+        {"oidc_authority": ""},
+    ],
+)
+def test_rejects_an_invalid_development_profile(monkeypatch, tmp_path, overrides) -> None:
+    location = _write_dev_profile(tmp_path, **overrides)
+    monkeypatch.setenv("GABRO_DEV_PROFILE", location)
+    monkeypatch.setattr(profile, "CONFIGURED", False)
+
+    with pytest.raises(RuntimeError, match="GABRO_DEV_PROFILE"):
+        profile._apply_development_profile()
+
+
+def test_rejects_an_unreadable_development_profile(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("GABRO_DEV_PROFILE", str(tmp_path / "absent.json"))
+    monkeypatch.setattr(profile, "CONFIGURED", False)
+
+    with pytest.raises(RuntimeError, match="GABRO_DEV_PROFILE"):
+        profile._apply_development_profile()
+
+
+def test_the_shipped_demo_profile_is_valid(monkeypatch) -> None:
+    """The file the demo README tells people to use must actually work."""
+    shipped = Path(__file__).parents[1] / "demo" / "gabro-dev-profile.json"
+    reloaded = _reload_profile(monkeypatch, str(shipped))
+    try:
+        assert reloaded.DEVELOPMENT is True
+        assert reloaded.OIDC_AUTHORITY.endswith("/realms/gatebroker-demo")
+        assert reloaded.BASE_URL == "http://localhost:8080/v1"
+    finally:
+        _reload_profile(monkeypatch, None)

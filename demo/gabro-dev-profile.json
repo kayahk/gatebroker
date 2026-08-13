@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "Development profile for the demo, so trying the CLI needs no source edits.",
+    "Only an unconfigured build reads this. A configured distribution compiles its",
+    "coordinates in and ignores GABRO_DEV_PROFILE entirely, so this cannot redirect",
+    "a signed release's token. See src/gatebroker/profile.py."
+  ],
+  "oidc_authority": "https://localhost:8443/realms/gatebroker-demo",
+  "client_id": "gabro-cli",
+  "scope": "openid broker",
+  "base_url": "http://localhost:8080/v1",
+  "gateway_name": "GateBroker demo",
+  "ca_bundle": "tls/ca.pem",
+  "models": [
+    [
+      "demo-small",
+      "Demo small"
+    ],
+    [
+      "demo-large",
+      "Demo large"
+    ]
+  ]
+}

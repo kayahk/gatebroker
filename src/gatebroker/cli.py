@@ -45,8 +45,10 @@ def _settings() -> tuple[str, str, str, str]:
     """
     if not profile.CONFIGURED:
         raise click.ClickException(
-            "This build has no distribution profile. Set the values in "
-            "gatebroker/profile.py and mark it CONFIGURED before signing a release."
+            "This build has no distribution profile. Either set the values in "
+            "gatebroker/profile.py and mark it CONFIGURED, or point "
+            "GABRO_DEV_PROFILE at a profile file for development. The demo ships "
+            "one at demo/gabro-dev-profile.json."
         )
     if bool(profile.TENANT_ID) == bool(profile.OIDC_AUTHORITY):
         raise click.ClickException(
@@ -221,11 +223,15 @@ def _save_cache(cache: msal.SerializableTokenCache) -> None:
 
 def _application(cache: msal.SerializableTokenCache) -> msal.PublicClientApplication:
     tenant_id, client_id, _scope, _base_url = _settings()
+    # MSAL goes through `requests`, which honours neither SSL_CERT_FILE nor the system
+    # trust store, so a private CA has to be handed to it explicitly.
+    verification = {"verify": profile.CA_BUNDLE} if profile.CA_BUNDLE else {}
     if tenant_id:
         return msal.PublicClientApplication(
             client_id=client_id,
             authority=f"https://login.microsoftonline.com/{tenant_id}",
             token_cache=cache,
+            **verification,
         )
     # A non-Microsoft provider is reached through OIDC discovery rather than the
     # Entra authority, so its device authorization endpoint is taken from the
@@ -234,6 +240,7 @@ def _application(cache: msal.SerializableTokenCache) -> msal.PublicClientApplica
         client_id=client_id,
         oidc_authority=profile.OIDC_AUTHORITY,
         token_cache=cache,
+        **verification,
     )
 
 
@@ -340,6 +347,13 @@ def _acquire_access_token() -> str:
 @click.group()
 def main() -> None:
     """Authenticate local OpenAI- and Anthropic-compatible tools to a private AI gateway."""
+    if profile.DEVELOPMENT:
+        # Say so every time. Someone should never be unsure whether the token they
+        # just minted came from a reviewed distribution or from a local file.
+        click.echo(
+            f"Using the development profile from {os.environ.get('GABRO_DEV_PROFILE')}",
+            err=True,
+        )
 
 
 def _configure_local_agent(agent: str, command: Sequence[str], *, reset: bool) -> None:

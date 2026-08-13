@@ -103,25 +103,26 @@ authenticates against, and it is where both attempts went wrong.
 ## Using the `gabro` CLI against the demo
 
 The automated checks use the password grant so they need no human at a browser. To
-drive the real device-code flow instead, point a local build at the demo realm.
-
-Set the distribution profile in `src/gatebroker/profile.py`:
-
-```python
-TENANT_ID = ""
-OIDC_AUTHORITY = "https://localhost:8443/realms/gatebroker-demo"
-CLIENT_ID = "gabro-cli"
-SCOPE = "openid broker"
-BASE_URL = "http://localhost:8080/v1"
-MODELS = (("demo-small", "Demo small"), ("demo-large", "Demo large"))
-CONFIGURED = True
-```
+drive the real device-code flow instead, point a local build at the demo realm. From the
+repository root:
 
 ```shell
-export SSL_CERT_FILE="$PWD/demo/tls/ca.pem"   # trust the demo CA
+export GABRO_DEV_PROFILE="$PWD/demo/gabro-dev-profile.json"
 uv run gabro login
 uv run gabro exec -- your-openai-compatible-client
 ```
+
+That is all: no source edits, no other variables. The shipped profile carries the demo
+realm's coordinates and points at the demo CA, and `gabro` prints which profile it is
+using on every invocation so you can never be unsure whether a token came from a
+reviewed distribution or from a local file.
+
+`GABRO_DEV_PROFILE` is read **only** by a build whose `profile.py` is still
+unconfigured, which is what makes it safe. A configured distribution has its
+coordinates compiled in and ignores the variable entirely, so it cannot be used to
+redirect a signed release's token — and an unconfigured build refuses to mint a token
+at all, so there is nothing there to subvert. The release workflow additionally refuses
+to bundle a build configured this way.
 
 This is also the shortest way to see that `gabro` is not Entra-specific: MSAL
 reaches Keycloak through OIDC discovery, taking the device authorization endpoint

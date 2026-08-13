@@ -194,6 +194,30 @@ CONFIGURED = True
 Then tag a release. The release workflow refuses to bundle while `CONFIGURED` is
 `False`, so an unconfigured build cannot reach users.
 
+For development, an *unconfigured* build can be pointed at a profile file instead of
+editing source:
+
+```shell
+export GABRO_DEV_PROFILE=/path/to/profile.json
+```
+
+```json
+{
+  "oidc_authority": "https://idp.example/realms/yours",
+  "client_id": "your-device-code-client",
+  "scope": "openid your-scope",
+  "base_url": "https://your-gateway.internal/v1",
+  "ca_bundle": "ca.pem",
+  "models": [["gpt-4o-mini", "GPT-4o mini"]]
+}
+```
+
+Use `tenant_id` instead of `oidc_authority` for Microsoft Entra. A relative `ca_bundle`
+is resolved against the profile file's own directory. The CLI announces on every run
+that it is using a development profile, and a configured distribution ignores the
+variable completely, so this cannot redirect a released build. The
+[demo](../demo/) ships a working example.
+
 The client you register for this flow must be a **public** client with device-code
 flow enabled and no secret, and it must be separate from the broker's own resource
 application. It should request only the broker's delegated scope.

@@ -45,6 +45,8 @@ def test_release_refuses_to_ship_an_unconfigured_distribution_profile() -> None:
 
     assert "Refuse to ship an unconfigured distribution profile" in workflow
     assert "if not profile.CONFIGURED:" in workflow
+    # A development profile must not be able to satisfy the gate either.
+    assert "if profile.DEVELOPMENT:" in workflow
 
 
 def test_release_builds_every_supported_platform_with_checksums() -> None:

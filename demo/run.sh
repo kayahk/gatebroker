@@ -16,6 +16,7 @@ compose() { docker compose "$@"; }
 case "${1:-check}" in
   down)
     compose --profile smoke down --volumes --remove-orphans
+    rm -f tls/.started-ca
     exit 0
     ;;
   logs)
@@ -30,7 +31,24 @@ case "${1:-check}" in
     ;;
 esac
 
+ca_fingerprint() {
+  openssl x509 -in tls/ca.pem -noout -fingerprint -sha256 2>/dev/null || echo none
+}
+
 ./tls/generate-certs.sh
+
+# A running container keeps the certificate it read at startup, so material reissued
+# underneath it leaves services presenting a chain that no longer matches the CA on
+# disk. Comparing against what the stack was last started with catches that, which
+# comparing the file against itself does not. The mismatch is thoroughly confusing to
+# debug -- a health check that fails on certificate verification while the files on
+# disk look perfectly consistent.
+started_marker="tls/.started-ca"
+recreate=""
+if [ "$(ca_fingerprint)" != "$(cat "${started_marker}" 2>/dev/null || echo none)" ]; then
+  echo "TLS material differs from what the running stack started with; recreating."
+  recreate="--force-recreate"
+fi
 
 echo
 echo "Building and starting the demo. First run pulls images and may take a few minutes."
@@ -38,7 +56,7 @@ echo "Building and starting the demo. First run pulls images and may take a few 
 # Bound the wait. Without a timeout a container whose health check never passes leaves
 # compose sitting at "Waiting" forever with no indication of what is wrong, so report
 # the failing check instead of hanging.
-if ! compose up --build --detach --wait --wait-timeout 300 gatebroker; then
+if ! compose up --build --detach --wait --wait-timeout 300 ${recreate} gatebroker; then
   echo
   echo "The stack did not become healthy. Last health check output per container:" >&2
   for container in $(compose ps --all --quiet); do
@@ -52,6 +70,8 @@ if ! compose up --build --detach --wait --wait-timeout 300 gatebroker; then
   echo "Container logs: ./run.sh logs    Start over: ./run.sh down && ./run.sh" >&2
   exit 1
 fi
+
+ca_fingerprint > "${started_marker}"
 
 echo
 echo "Stack is ready. Nothing else to configure:"
