@@ -172,6 +172,23 @@ a third party. That is why the mock provider in this demo never sees a user id, 
 why the checks do not look for one. The observable hop for attribution is
 broker-to-gateway, which this topology does not expose.
 
+## If something does not come up
+
+`./run.sh` bounds how long it waits and then prints the last health check output for
+every container, so a service that never becomes healthy says why instead of sitting at
+"Waiting".
+
+The most likely cause after an upgrade is stale TLS material. `tls/generate-certs.sh`
+validates what is on disk rather than reusing it blindly — it checks the key-identifier
+extensions, that `localhost` is present as a subject alternative name, that nothing is
+close to expiry, and that each certificate really was signed by the CA next to it — and
+reissues everything if any of that fails. To force a clean slate:
+
+```shell
+rm -f tls/*.pem tls/*.key
+./run.sh down && ./run.sh
+```
+
 ## Not production
 
 Passwords are `demo`, the CA is throwaway, Keycloak runs `start-dev` with an

@@ -34,7 +34,24 @@ esac
 
 echo
 echo "Building and starting the demo. First run pulls images and may take a few minutes."
-compose up --build --detach --wait gatebroker
+
+# Bound the wait. Without a timeout a container whose health check never passes leaves
+# compose sitting at "Waiting" forever with no indication of what is wrong, so report
+# the failing check instead of hanging.
+if ! compose up --build --detach --wait --wait-timeout 300 gatebroker; then
+  echo
+  echo "The stack did not become healthy. Last health check output per container:" >&2
+  for container in $(compose ps --all --quiet); do
+    name=$(docker inspect --format '{{.Name}}' "${container}" | sed 's|^/||')
+    state=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container}")
+    echo >&2
+    echo "--- ${name} (${state})" >&2
+    docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}{{.Output}}{{end}}{{end}}' "${container}" 2>/dev/null | tail -20 >&2
+  done
+  echo >&2
+  echo "Container logs: ./run.sh logs    Start over: ./run.sh down && ./run.sh" >&2
+  exit 1
+fi
 
 echo
 echo "Stack is ready. Nothing else to configure:"
