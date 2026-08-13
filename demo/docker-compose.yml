@@ -18,15 +18,11 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-      # Tokens carry this as `iss`, and the broker requires the JWKS endpoint to
-      # belong to it, so it must be the name resolvable inside the network. It is
-      # deliberately fixed rather than derived from the request host: a varying
-      # issuer would mean tokens the broker cannot validate.
-      KC_HOSTNAME: https://keycloak:8443
-      # Serve the admin console under a name a browser on the host can resolve, so
-      # visiting it needs no hosts-file entry. This affects the console only; the
-      # issuer above is unchanged.
-      KC_HOSTNAME_ADMIN: https://localhost:8443
+      # No server-wide hostname on purpose. Keycloak then answers on whatever host
+      # the request arrived at, so the admin console works in a browser on
+      # localhost. The demo realm pins its own issuer to https://keycloak:8443
+      # through the realm's frontendUrl attribute, which is what keeps tokens
+      # validatable by the broker no matter which host minted them.
       KC_HTTP_ENABLED: "false"
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro

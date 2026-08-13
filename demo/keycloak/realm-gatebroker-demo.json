@@ -1,6 +1,9 @@
 {
   "realm": "gatebroker-demo",
   "enabled": true,
+  "attributes": {
+    "frontendUrl": "https://keycloak:8443"
+  },
   "sslRequired": "none",
   "accessTokenLifespan": 1800,
   "roles": {

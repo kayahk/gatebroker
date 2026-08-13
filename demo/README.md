@@ -79,22 +79,30 @@ The Keycloak admin console is at <https://localhost:8443> (`admin`/`admin`). The
 certificate is the demo's own, so your browser will warn once; accept it and
 continue.
 
-## Two names for one Keycloak, and why
+## One Keycloak, two hostnames, and why
 
-Tokens carry the issuer they were minted by, and the broker validates it. So the
-issuer has to be a name that means the same thing to every party that uses it, which
-is why it is fixed to `https://keycloak:8443` — the name that resolves inside the
-Compose network.
+Tokens carry the issuer that minted them, and the broker validates it and requires the
+JWKS endpoint to share its origin. So the demo realm's issuer has to be a name that
+means the same thing to everyone who uses it, and inside the Compose network that name
+is `keycloak`.
 
-A browser on your machine cannot resolve `keycloak`, so the admin console is served
-under a second name, `https://localhost:8443`, via Keycloak's `hostname-admin`
-option. That affects the console only. If both were pinned to `keycloak`, visiting
-the console would redirect you to a host your machine cannot look up; if the issuer
-followed the request host instead, tokens obtained through `localhost` would carry an
-issuer the broker rejects.
+Your browser cannot resolve `keycloak`, so the server itself is left with no fixed
+hostname: Keycloak answers on whatever host the request arrived at, which keeps the
+admin console and the master realm on `localhost`. The demo realm then pins its own
+issuer with the realm-level `frontendUrl` attribute, so its tokens always say
+`https://keycloak:8443` however they were requested.
 
-This split is why the `gabro` CLI section below still needs a hosts-file entry: the
-CLI acquires real tokens, so it has to reach Keycloak by the issuer's own name.
+Splitting it at the realm rather than the server matters, and getting it wrong is
+quietly confusing. Pinning the whole server to `keycloak` makes the console redirect
+your browser to a host it cannot look up. Serving only the console under `localhost`
+looks like it works, but the console is a browser app that authenticates against the
+*master* realm — and that realm's endpoints still pointed at `keycloak`, so it failed
+with "Something went wrong" and nothing in the server log, because the failure was in
+the browser. Leaving the issuer to follow the request host would be worse in the other
+direction: tokens fetched via `localhost` would carry an issuer the broker rejects.
+
+This is also why the `gabro` CLI section below needs a hosts-file entry. The CLI
+acquires real tokens, so it has to reach Keycloak by the issuer's own name.
 
 ## Using the `gabro` CLI against the demo
 
