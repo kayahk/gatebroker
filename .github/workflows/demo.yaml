@@ -1,0 +1,36 @@
+name: Demo
+
+# The demo is documentation that runs, so it has to keep running. Without this it
+# would quietly rot the first time a claim shape or default changed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    name: End-to-end demo (Docker Compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run the demo end to end
+        working-directory: demo
+        run: ./run.sh
+
+      - name: Show logs on failure
+        if: failure()
+        working-directory: demo
+        run: docker compose logs --tail 200
+
+      - name: Tear down
+        if: always()
+        working-directory: demo
+        run: ./run.sh down

@@ -1,0 +1,26 @@
+# LiteLLM configuration for the demo.
+#
+# Both models point at the mock provider, so the demo needs no provider account and
+# makes no outbound calls. Swap `api_base` and `api_key` for a real provider and the
+# rest of the demo is unchanged.
+model_list:
+  - model_name: demo-small
+    litellm_params:
+      model: openai/demo-small
+      api_base: http://mock-model:8081/v1
+      api_key: mock-provider-key-not-a-secret
+  - model_name: demo-large
+    litellm_params:
+      model: openai/demo-large
+      api_base: http://mock-model:8081/v1
+      api_key: mock-provider-key-not-a-secret
+
+general_settings:
+  # The credential the broker presents upstream. A real deployment issues a
+  # separate LiteLLM virtual key per entitlement policy so usage is attributable
+  # per group; that needs LiteLLM's database, which this demo deliberately omits.
+  master_key: sk-demo-gateway-key-not-a-secret
+
+litellm_settings:
+  drop_params: true
+  telemetry: false

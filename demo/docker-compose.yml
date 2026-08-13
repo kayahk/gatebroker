@@ -1,0 +1,138 @@
+# End-to-end GateBroker demo. See README.md.
+#
+# identity (Keycloak) -> gatebroker -> gateway (LiteLLM) -> mock model provider
+#
+# Nothing here reaches the internet at run time and no provider account is needed.
+name: gatebroker-demo
+
+services:
+  # The identity provider, standing in for Entra, Okta, or Auth0. Seeded with three
+  # users in different groups so entitlement resolution is observable.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    command:
+      - start-dev
+      - --import-realm
+      - --https-certificate-file=/etc/tls/keycloak.pem
+      - --https-certificate-key-file=/etc/tls/keycloak.key
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # Tokens carry this as `iss`, and the broker requires the JWKS endpoint to
+      # belong to it, so it must be the name every party resolves.
+      KC_HOSTNAME: https://keycloak:8443
+      KC_HTTP_ENABLED: "false"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+      - ./tls:/etc/tls:ro
+    ports:
+      - "8443:8443"
+
+  # Gates the broker on the two things it actually needs, since Keycloak's own
+  # health port inherits TLS and its image carries no HTTP client.
+  services-ready:
+    image: python:3.11-slim
+    command: ["python", "/srv/wait-for-services.py"]
+    environment:
+      SSL_CERT_FILE: /etc/demo-tls/ca.pem
+    volumes:
+      - ./wait:/srv:ro
+      - ./tls:/etc/demo-tls:ro
+    depends_on:
+      keycloak:
+        condition: service_started
+      litellm:
+        condition: service_started
+      mock-model:
+        condition: service_healthy
+
+  # Stands in for a real model provider so the demo needs no API key.
+  mock-model:
+    image: python:3.11-slim
+    command: ["python", "/srv/server.py"]
+    volumes:
+      - ./mock-model:/srv:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8081/health').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # The gateway. Single unified image, no database, no UI login: enough to prove the
+  # broker's upstream contract without a production split deployment.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command:
+      - --config
+      - /etc/litellm/config.yaml
+      - --port
+      - "4000"
+      - --ssl_certfile_path
+      - /etc/tls/litellm.pem
+      - --ssl_keyfile_path
+      - /etc/tls/litellm.key
+    environment:
+      LITELLM_MASTER_KEY: sk-demo-gateway-key-not-a-secret
+      LITELLM_LOG: ERROR
+    volumes:
+      - ./litellm:/etc/litellm:ro
+      - ./tls:/etc/tls:ro
+    depends_on:
+      mock-model:
+        condition: service_healthy
+
+  # The component under demonstration, built from this repository.
+  gatebroker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      GABRO_OIDC_ISSUER: https://keycloak:8443/realms/gatebroker-demo
+      GABRO_OIDC_JWKS_URL: https://keycloak:8443/realms/gatebroker-demo/protocol/openid-connect/certs
+      GABRO_OIDC_AUDIENCE: gatebroker-api
+      GABRO_OIDC_REQUIRED_SCOPE: broker
+      # Keycloak spells granted scopes `scope` and the subject `sub`; Entra uses
+      # `scp` and `oid`, which are the defaults.
+      GABRO_OIDC_SCOPE_CLAIM: scope
+      GABRO_OIDC_SUBJECT_CLAIM: sub
+      GABRO_OIDC_ALLOWED_APP_ROLES: broker-automation
+      GABRO_POLICY_PATH: /etc/gatebroker/policies.json
+      GABRO_KEY_DIR: /etc/gatebroker
+      GABRO_UPSTREAM_BASE_URL: https://litellm:4000
+      GABRO_UPSTREAM_TRUSTED_HOSTS: litellm
+      GABRO_RATE_LIMIT_REQUESTS: "30"
+      GABRO_RATE_LIMIT_WINDOW_SECONDS: "60"
+      # Both the JWKS fetch and the upstream call must trust the demo CA. The
+      # broker's HTTP clients run with trust_env=False so nothing ambient can
+      # redirect them, which is why the CA is named here rather than inherited.
+      GABRO_TLS_CA_BUNDLE: /etc/gatebroker-tls/ca.pem
+    volumes:
+      - ./entitlements:/etc/gatebroker:ro
+      - ./tls:/etc/gatebroker-tls:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      services-ready:
+        condition: service_completed_successfully
+    healthcheck:
+      # Ready only once the JWKS snapshot is fresh and every policy key resolves.
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/readyz').read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+
+  # Drives the walkthrough from inside the network, where the demo CA is trusted
+  # and `keycloak` resolves. Does not run unless asked for by profile.
+  smoke:
+    image: python:3.11-slim
+    profiles: ["smoke"]
+    command: ["python", "/srv/smoke.py"]
+    environment:
+      SSL_CERT_FILE: /etc/demo-tls/ca.pem
+    volumes:
+      - ./smoke:/srv:ro
+      - ./tls:/etc/demo-tls:ro
+    depends_on:
+      gatebroker:
+        condition: service_healthy

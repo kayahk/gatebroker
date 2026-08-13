@@ -1,0 +1,25 @@
+{
+  "policies": [
+    {
+      "id": "engineering",
+      "group_ids": ["engineering"],
+      "allowed_models": ["demo-small", "demo-large"],
+      "key_ref": "ENGINEERING_GATEWAY_KEY",
+      "priority": 10
+    },
+    {
+      "id": "contractors",
+      "group_ids": ["contractors"],
+      "allowed_models": ["demo-small"],
+      "key_ref": "CONTRACTOR_GATEWAY_KEY",
+      "priority": 20
+    },
+    {
+      "id": "automation",
+      "app_roles": ["broker-automation"],
+      "allowed_models": ["demo-small"],
+      "key_ref": "AUTOMATION_GATEWAY_KEY",
+      "priority": 30
+    }
+  ]
+}

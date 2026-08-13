@@ -1,0 +1,4 @@
+# Throwaway demo TLS material, reissued by tls/generate-certs.sh on demand.
+tls/*.pem
+tls/*.key
+tls/*.srl

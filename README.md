@@ -71,6 +71,17 @@ is a separate question, and not one GateBroker answers — a model name is just 
 string in a policy's allow-list, so what it resolves to is whatever your gateway
 routes it to.
 
+## See it work first
+
+A single command brings up a real identity provider, a real gateway, and the broker,
+then proves the whole path — including the refusals:
+
+```shell
+cd demo && ./run.sh
+```
+
+No provider account, no API key, no outbound calls. See [`demo/`](demo/).
+
 ## Quick start
 
 ```shell
@@ -259,6 +270,7 @@ public issue.
 
 ## Documentation
 
+- [`demo/`](demo/) — a runnable end-to-end demo against Keycloak and LiteLLM
 - [`docs/cli.md`](docs/cli.md) — installing and using `gabro`, and building your own distribution
 - [`docs/operations.md`](docs/operations.md) — running the service, audit events, diagnosing failures
 - [`docs/releases.md`](docs/releases.md) — release and signing administration
