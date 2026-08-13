@@ -73,18 +73,37 @@ curl -s http://localhost:8080/v1/chat/completions \
 ```
 
 Swap `demo-large` for `demo-small` as `bob`, or try `carol`, to watch entitlement
-resolution refuse the call. The Keycloak admin console is at
-<https://localhost:8443> (`admin`/`admin`); the certificate is the demo's own, so
-your browser will warn.
+resolution refuse the call.
+
+The Keycloak admin console is at <https://localhost:8443> (`admin`/`admin`). The
+certificate is the demo's own, so your browser will warn once; accept it and
+continue.
+
+## Two names for one Keycloak, and why
+
+Tokens carry the issuer they were minted by, and the broker validates it. So the
+issuer has to be a name that means the same thing to every party that uses it, which
+is why it is fixed to `https://keycloak:8443` — the name that resolves inside the
+Compose network.
+
+A browser on your machine cannot resolve `keycloak`, so the admin console is served
+under a second name, `https://localhost:8443`, via Keycloak's `hostname-admin`
+option. That affects the console only. If both were pinned to `keycloak`, visiting
+the console would redirect you to a host your machine cannot look up; if the issuer
+followed the request host instead, tokens obtained through `localhost` would carry an
+issuer the broker rejects.
+
+This split is why the `gabro` CLI section below still needs a hosts-file entry: the
+CLI acquires real tokens, so it has to reach Keycloak by the issuer's own name.
 
 ## Using the `gabro` CLI against the demo
 
 The automated checks use the password grant so they need no human at a browser. To
 drive the real device-code flow instead, point a local build at the demo realm.
 
-Because tokens carry `https://keycloak:8443` as their issuer, that name has to mean
-the same thing on your machine as it does inside the network. Add it to your hosts
-file once:
+This is the one part that needs a hosts-file entry, for the reason above: the CLI
+acquires a real token, so it must reach Keycloak by the issuer's own name rather than
+through the console's `localhost` alias.
 
 ```shell
 echo '127.0.0.1 keycloak' | sudo tee -a /etc/hosts
