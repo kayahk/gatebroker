@@ -271,6 +271,7 @@ public issue.
 ## Documentation
 
 - [`demo/`](demo/) — a runnable end-to-end demo against Keycloak and LiteLLM
+- [Nobody needs an API key for your model gateway](docs/blog/nobody-needs-an-api-key.md) — why this exists, and what it deliberately is not
 - [`docs/cli.md`](docs/cli.md) — installing and using `gabro`, and building your own distribution
 - [`docs/operations.md`](docs/operations.md) — running the service, audit events, diagnosing failures
 - [`docs/releases.md`](docs/releases.md) — release and signing administration
