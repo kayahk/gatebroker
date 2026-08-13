@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
@@ -157,6 +158,7 @@ def create_app(
     rate_limiter: RateLimiter,
     transport: httpx.AsyncBaseTransport | None = None,
     allow_cluster_local_plaintext_upstream: bool = False,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> FastAPI:
     """Create a broker that authenticates, selects one policy, and forwards safely."""
     policies = load_policies(policies_json)
@@ -177,10 +179,13 @@ def create_app(
     )
     upstream_client = httpx.AsyncClient(
         transport=transport,
+        # No ambient environment variable may redirect this client through a proxy,
+        # so a private CA has to be supplied deliberately rather than inherited.
         trust_env=False,
         follow_redirects=False,
         timeout=httpx.Timeout(300.0, connect=5.0, write=30.0, pool=5.0),
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        **({} if ssl_context is None else {"verify": ssl_context}),
     )
     app.router.on_shutdown.append(upstream_client.aclose)
 
@@ -385,8 +390,10 @@ def _validated_base_url(
     ):
         raise ValueError("invalid upstream base URL")
     if url.scheme == "https":
-        if url.port not in {None, 443}:
-            raise ValueError("invalid upstream base URL")
+        # Any port is allowed over TLS. Gateways commonly listen on something other
+        # than 443, and the port carries no security meaning once the scheme, the
+        # exact host allowlist, and certificate validation have been applied.
+        pass
     elif url.scheme == "http":
         # Plaintext is permitted only as an explicit deployment decision and
         # only toward in-cluster Service DNS names, never external hosts. The

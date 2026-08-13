@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -91,7 +91,7 @@ def test_rejects_invalid_verified_claims(
 
 @pytest.mark.parametrize(
     ("claim", "reason"),
-    [("exp", "expired"), ("nbf", "not yet valid")],
+    [("exp", "expired")],
 )
 def test_rejects_verified_tokens_missing_required_temporal_claim(
     claim: str, reason: str
@@ -149,3 +149,72 @@ def test_accepts_allowed_app_role_when_delegated_scope_is_absent() -> None:
 
     assert identity.subject == "user-object-id"
     assert identity.app_roles == frozenset({"Broker.Access"})
+
+
+def test_accepts_a_delegated_scope_from_a_configured_scope_claim() -> None:
+    """Most providers spell granted scopes `scope` rather than Entra's `scp`."""
+    payload = valid_payload(scp=None)
+    payload["scope"] = "openid broker.access"
+
+    identity = validate_access_token(
+        "opaque-test-token",
+        replace(config(), scope_claim="scope"),
+        FakeVerifier(payload),
+        now=1_500,
+    )
+
+    assert identity.subject == "user-object-id"
+
+
+def test_a_scope_in_the_wrong_claim_does_not_authorize() -> None:
+    payload = valid_payload(scp=None)
+    payload["scope"] = "openid broker.access"
+
+    with pytest.raises(TokenValidationError, match="missing required authorization"):
+        validate_access_token(
+            "opaque-test-token", config(), FakeVerifier(payload), now=1_500
+        )
+
+
+def test_accepts_a_token_without_nbf() -> None:
+    """`nbf` is optional in RFC 7519 and providers such as Keycloak omit it."""
+    payload = valid_payload()
+    del payload["nbf"]
+
+    identity = validate_access_token(
+        "opaque-test-token", config(), FakeVerifier(payload), now=1_500
+    )
+
+    assert identity.subject == "user-object-id"
+
+
+def test_still_enforces_nbf_when_the_provider_sends_it() -> None:
+    with pytest.raises(TokenValidationError, match="token not yet valid"):
+        validate_access_token(
+            "opaque-test-token",
+            config(),
+            FakeVerifier(valid_payload(nbf=1_600)),
+            now=1_500,
+        )
+
+
+@pytest.mark.parametrize("nbf", ["1000", None, True, float("nan"), float("inf")])
+def test_rejects_an_unusable_nbf_rather_than_ignoring_it(nbf: object) -> None:
+    """A present but malformed claim must fail closed, not be treated as absent."""
+    with pytest.raises(TokenValidationError, match="token not yet valid"):
+        validate_access_token(
+            "opaque-test-token",
+            config(),
+            FakeVerifier(valid_payload(nbf=nbf)),
+            now=1_500,
+        )
+
+
+def test_still_requires_exp() -> None:
+    payload = valid_payload()
+    del payload["exp"]
+
+    with pytest.raises(TokenValidationError, match="token expired"):
+        validate_access_token(
+            "opaque-test-token", config(), FakeVerifier(payload), now=1_500
+        )

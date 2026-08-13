@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import re
+import ssl
 import time
 from collections.abc import Mapping
 from contextlib import suppress
@@ -46,6 +47,7 @@ class RuntimeSettings:
     rate_limit_max_keys: int
     allow_cluster_local_plaintext_upstream: bool = False
     key_directory: str = ""
+    tls_ca_bundle: str = ""
 
 
 def load_runtime_settings(environment: Mapping[str, str] | None = None) -> RuntimeSettings:
@@ -75,7 +77,12 @@ def load_runtime_settings(environment: Mapping[str, str] | None = None) -> Runti
             audience=audience,
             required_delegated_scope=required_scope,
             allowed_app_roles=frozenset(_csv(values.get("GABRO_OIDC_ALLOWED_APP_ROLES", ""))),
-            subject_claim=_claim_name(values.get("GABRO_OIDC_SUBJECT_CLAIM", "oid")),
+            subject_claim=_claim_name(
+                values.get("GABRO_OIDC_SUBJECT_CLAIM", "oid"), "GABRO_OIDC_SUBJECT_CLAIM"
+            ),
+            scope_claim=_claim_name(
+                values.get("GABRO_OIDC_SCOPE_CLAIM", "scp"), "GABRO_OIDC_SCOPE_CLAIM"
+            ),
         ),
         jwks_url=jwks_url,
         policies_json=policies_json,
@@ -91,7 +98,38 @@ def load_runtime_settings(environment: Mapping[str, str] | None = None) -> Runti
             "GABRO_UPSTREAM_ALLOW_CLUSTER_LOCAL_PLAINTEXT",
         ),
         key_directory=values.get("GABRO_KEY_DIR", "").strip(),
+        tls_ca_bundle=_readable_ca_bundle(values.get("GABRO_TLS_CA_BUNDLE", "").strip()),
     )
+
+
+def _readable_ca_bundle(path: str) -> str:
+    """Fail at startup rather than on the first request if the CA is unusable."""
+    if not path:
+        return ""
+    try:
+        if not Path(path).is_file():
+            raise OSError("not a file")
+        Path(path).read_bytes()
+    except OSError as error:
+        raise RuntimeError("GABRO_TLS_CA_BUNDLE is unreadable") from error
+    return path
+
+
+def build_ssl_context(settings: RuntimeSettings) -> ssl.SSLContext | None:
+    """Return the verification context, or None to use the default trust store.
+
+    An internal identity provider or gateway is often fronted by a private CA. The
+    HTTP clients here run with ``trust_env=False`` so that no ambient environment
+    variable can redirect them through a proxy, which also means they will not pick
+    a CA up from the environment. Naming the bundle explicitly keeps the operator's
+    decision deliberate and visible.
+    """
+    if not settings.tls_ca_bundle:
+        return None
+    context = ssl.create_default_context(cafile=settings.tls_ca_bundle)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return context
 
 
 def build_key_resolver(settings: RuntimeSettings) -> KeyResolver:
@@ -137,6 +175,7 @@ class JwksVerifier:
             settings.jwks_url,
             cache_keys=False,
             timeout=5,
+            ssl_context=build_ssl_context(settings),
         )
         self._condition = Condition()
         self._keys: dict[str, jwt.PyJWK] = {}
@@ -160,9 +199,9 @@ class JwksVerifier:
             algorithms=["RS256"],
             audience=self._config.audience,
             issuer=self._config.issuer,
-            options={
-                "require": ["exp", "nbf", "iss", "aud", self._config.subject_claim]
-            },
+            # `nbf` is deliberately absent: it is optional in RFC 7519 and many
+            # providers omit it. PyJWT still enforces it whenever it is present.
+            options={"require": ["exp", "iss", "aud", self._config.subject_claim]},
         )
         return claims
 
@@ -312,6 +351,7 @@ def create_runtime_app(
             max_keys=settings.rate_limit_max_keys,
         ),
         transport=transport,
+        ssl_context=build_ssl_context(settings),
     )
 
     if isinstance(verifier, JwksVerifier):
@@ -367,12 +407,12 @@ def _csv(value: str) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
-def _claim_name(value: str) -> str:
+def _claim_name(value: str, name: str) -> str:
     """Accept only a plain claim name, so it cannot smuggle in JWT decode options."""
-    name = value.strip()
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-        raise RuntimeError("GABRO_OIDC_SUBJECT_CLAIM must be a plain claim name")
-    return name
+    claim = value.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", claim):
+        raise RuntimeError(f"{name} must be a plain claim name")
+    return claim
 
 
 _ENTRA_HOST = "login.microsoftonline.com"

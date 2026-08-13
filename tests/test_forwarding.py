@@ -122,7 +122,10 @@ def get(app, path: str) -> httpx.Response:
     [
         "http://gateway.internal",
         "https://untrusted.example",
-        "https://gateway.internal:8443",
+        "https://gateway.internal:8443@evil.example",
+        "https://gateway.internal?redirect=https://evil.example",
+        "https://gateway.internal#fragment",
+        "ftp://gateway.internal",
     ],
 )
 def test_rejects_untrusted_or_non_tls_upstream_destination(base_url: str) -> None:
@@ -146,8 +149,6 @@ def test_rejects_untrusted_or_non_tls_upstream_destination(base_url: str) -> Non
         # The opt-in never unlocks plaintext toward non-cluster-local hosts.
         ("http://gateway.internal", "gateway.internal", True),
         ("http://gateway.example.com:4000", "gateway.example.com", True),
-        # The opt-in does not weaken the HTTPS contract.
-        ("https://gateway.internal:8443", "gateway.internal", True),
     ],
 )
 def test_rejects_plaintext_upstream_unless_explicitly_cluster_local(
@@ -1883,3 +1884,30 @@ def test_depth_limit_does_not_depend_on_the_interpreter_recursion_limit() -> Non
     )
     assert not forwarding._exceeds_max_json_depth(b'{"a": [1, 2, {"b": []}]}')
     assert not forwarding._exceeds_max_json_depth(rb'{"a": "\\[[[["}')
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://gateway.internal", "https://gateway.internal:443", "https://gateway.internal:4000"],
+)
+def test_accepts_a_tls_upstream_on_any_port(base_url: str) -> None:
+    """A gateway on a non-default TLS port is normal, and no less protected."""
+    app = create_app(
+        oidc_config=config(),
+        token_verifier=verified_claims,
+        policies_json=POLICIES,
+        upstream_base_url=base_url,
+        trusted_upstream_hosts=frozenset({"gateway.internal"}),
+        key_resolver=lambda _name: "test-policy-key",
+        rate_limiter=lambda _key: True,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+    )
+
+    response = post(
+        app,
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer client-token"},
+        json={"model": "gpt-4o-mini", "messages": []},
+    )
+
+    assert response.status_code == 200

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import secrets
 from concurrent.futures import ThreadPoolExecutor
@@ -654,4 +655,96 @@ def test_rejects_a_subject_claim_that_is_not_a_plain_name(tmp_path: Path, claim:
     environment["GABRO_OIDC_SUBJECT_CLAIM"] = claim
 
     with pytest.raises(RuntimeError, match="GABRO_OIDC_SUBJECT_CLAIM"):
+        load_runtime_settings(environment)
+
+
+def test_scope_claim_is_configurable_for_providers_that_use_the_oauth_spelling(
+    tmp_path: Path,
+) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = _generic_issuer_environment(policy_path)
+    environment["GABRO_OIDC_SCOPE_CLAIM"] = "scope"
+
+    settings = load_runtime_settings(environment)
+
+    assert settings.oidc.scope_claim == "scope"
+
+
+def test_scope_claim_defaults_to_the_entra_spelling(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+
+    settings = load_runtime_settings(runtime_environment(policy_path))
+
+    assert settings.oidc.scope_claim == "scp"
+
+
+def test_rejects_a_scope_claim_that_is_not_a_plain_name(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = _generic_issuer_environment(policy_path)
+    environment["GABRO_OIDC_SCOPE_CLAIM"] = "not a claim"
+
+    with pytest.raises(RuntimeError, match="GABRO_OIDC_SCOPE_CLAIM"):
+        load_runtime_settings(environment)
+
+
+def test_no_ca_bundle_means_the_default_trust_store(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+
+    settings = load_runtime_settings(runtime_environment(policy_path))
+
+    assert settings.tls_ca_bundle == ""
+    assert runtime.build_ssl_context(settings) is None
+
+
+def test_a_private_ca_bundle_becomes_a_verifying_context(tmp_path: Path) -> None:
+    """An internal IdP or gateway behind a private CA must be reachable."""
+    import ssl
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test ca")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2040, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    bundle = tmp_path / "ca.pem"
+    bundle.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = runtime_environment(policy_path)
+    environment["GABRO_TLS_CA_BUNDLE"] = str(bundle)
+
+    settings = load_runtime_settings(environment)
+    context = runtime.build_ssl_context(settings)
+
+    assert settings.tls_ca_bundle == str(bundle)
+    assert context is not None
+    # Verification must not be weakened by supplying a CA.
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+def test_rejects_an_unreadable_ca_bundle_at_startup(tmp_path: Path) -> None:
+    """Fail on boot, not on the first request that needs the upstream."""
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = runtime_environment(policy_path)
+    environment["GABRO_TLS_CA_BUNDLE"] = str(tmp_path / "absent.pem")
+
+    with pytest.raises(RuntimeError, match="GABRO_TLS_CA_BUNDLE"):
         load_runtime_settings(environment)

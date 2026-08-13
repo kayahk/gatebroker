@@ -29,6 +29,10 @@ class TokenValidationConfig:
     # `oid`, because `sub` there is pairwise per application and so is not a
     # durable identity. Most other providers use `sub`.
     subject_claim: str = "oid"
+    # Which claim carries granted delegated scopes as a space-separated string.
+    # Entra uses `scp`; the OAuth 2.0 token-introspection spelling that most other
+    # providers follow is `scope`.
+    scope_claim: str = "scp"
 
 
 @dataclass(frozen=True)
@@ -74,15 +78,21 @@ def validate_access_token(
 
 def _validate_temporal_claims(claims: Mapping[str, object], now: int | float) -> None:
     exp = claims.get("exp")
-    nbf = claims.get("nbf")
     if not _number(exp):
         raise TokenValidationError("token expired")
     if now >= exp:
         raise TokenValidationError("token expired")
-    if not _number(nbf):
-        raise TokenValidationError("token not yet valid")
-    if now < nbf:
-        raise TokenValidationError("token not yet valid")
+    # `nbf` is optional in RFC 7519 and many providers, including Keycloak, omit it
+    # from access tokens. Requiring it would reject those providers outright while
+    # adding nothing: `exp` already bounds the token's lifetime. Enforce it when it
+    # is present, and reject a value that is present but unusable rather than
+    # ignoring it.
+    if "nbf" in claims:
+        nbf = claims["nbf"]
+        if not _number(nbf):
+            raise TokenValidationError("token not yet valid")
+        if now < nbf:
+            raise TokenValidationError("token not yet valid")
 
 
 def _has_configured_audience(audience: object, configured_audience: str) -> bool:
@@ -102,7 +112,7 @@ def _reject_group_overage(claims: Mapping[str, object]) -> None:
 def _is_authorized(
     claims: Mapping[str, object], config: TokenValidationConfig
 ) -> bool:
-    scopes = claims.get("scp")
+    scopes = claims.get(config.scope_claim)
     if isinstance(scopes, str) and config.required_delegated_scope in scopes.split():
         return True
     return bool(_string_set(claims.get("roles")) & config.allowed_app_roles)
