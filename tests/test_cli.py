@@ -395,7 +395,7 @@ def test_failed_silent_refresh_persists_changed_cache_before_requiring_login(mon
     cache.serialize.return_value = '{"RefreshToken":{"refresh":"cleaned-refresh-state"}}'
     application = Mock()
     application.get_accounts.return_value = [object()]
-    application.acquire_token_silent.return_value = {}
+    application.acquire_token_silent_with_error.return_value = {}
     saved: dict[str, str] = {}
 
     monkeypatch.setattr(cli, "_load_cache", lambda: cache)
@@ -695,3 +695,77 @@ def test_version_does_not_require_a_configured_profile(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "no distribution profile" not in result.output
+
+
+def _silent_application(result: object) -> Mock:
+    application = Mock()
+    application.get_accounts.return_value = [object()]
+    application.acquire_token_silent_with_error.return_value = result
+    return application
+
+
+def test_a_failed_renewal_reports_cleanly_rather_than_crashing(monkeypatch) -> None:
+    """MSAL returns None when it cannot redeem the refresh token, which used to reach
+    `.get` on None and print a traceback at the user.
+    """
+    cache = Mock()
+    cache.has_state_changed = False
+    monkeypatch.setattr(cli, "_load_cache", lambda: cache)
+    monkeypatch.setattr(cli, "_application", lambda _cache: _silent_application(None))
+
+    with pytest.raises(click.ClickException, match="run gabro login"):
+        cli._acquire_access_token()
+
+
+def test_a_failed_renewal_says_why_when_the_provider_explains(monkeypatch) -> None:
+    """A bare "sign in again" right after signing in successfully is unactionable."""
+    cache = Mock()
+    cache.has_state_changed = False
+    rejection = {
+        "error": "invalid_scope",
+        "error_description": "Invalid scopes: offline_access openid broker profile",
+    }
+    monkeypatch.setattr(cli, "_load_cache", lambda: cache)
+    monkeypatch.setattr(cli, "_application", lambda _cache: _silent_application(rejection))
+
+    with pytest.raises(click.ClickException) as raised:
+        cli._acquire_access_token()
+
+    message = str(raised.value)
+    assert "invalid_scope" in message
+    assert "Invalid scopes" in message
+
+
+def test_a_renewal_failure_reason_reports_only_the_error_not_the_whole_result(
+    monkeypatch,
+) -> None:
+    """Only the error code and description are repeated, never other fields."""
+    cache = Mock()
+    cache.has_state_changed = False
+    rejection = {
+        "error": "invalid_grant",
+        "error_description": "Token is not active",
+        "refresh_token": "secret-refresh-material",
+        "id_token": "secret-id-material",
+    }
+    monkeypatch.setattr(cli, "_load_cache", lambda: cache)
+    monkeypatch.setattr(cli, "_application", lambda _cache: _silent_application(rejection))
+
+    with pytest.raises(click.ClickException) as raised:
+        cli._acquire_access_token()
+
+    message = str(raised.value)
+    assert "invalid_grant" in message
+    assert "secret-refresh-material" not in message
+    assert "secret-id-material" not in message
+
+
+def test_a_renewal_that_succeeds_returns_the_token(monkeypatch) -> None:
+    cache = Mock()
+    cache.has_state_changed = False
+    monkeypatch.setattr(cli, "_load_cache", lambda: cache)
+    monkeypatch.setattr(
+        cli, "_application", lambda _cache: _silent_application({"access_token": "renewed"})
+    )
+
+    assert cli._acquire_access_token() == "renewed"

@@ -116,3 +116,56 @@ def test_the_gateway_key_the_broker_presents_is_the_one_the_gateway_expects() ->
 
     for policy in policies:
         assert (entitlements / policy.key_ref).read_text(encoding="utf-8").strip() == expected
+
+
+def test_the_realm_accepts_the_scopes_the_identity_library_always_adds() -> None:
+    """MSAL appends offline_access, openid and profile to every request it makes.
+
+    Declaring client scopes replaces Keycloak's defaults, so these have to be present
+    or the first silent renewal after a successful sign-in is rejected with
+    invalid_scope -- a failure that only appears once the access token expires.
+    """
+    declared = {scope["name"] for scope in REALM["clientScopes"]}
+    client = _client("gabro-cli")
+    assigned = set(client["defaultClientScopes"]) | set(client.get("optionalClientScopes", []))
+
+    for required in ("profile", "offline_access"):
+        assert required in declared, required
+        assert required in assigned, required
+
+
+def test_offline_access_is_optional_rather_than_default() -> None:
+    """As a default scope every request implicitly asks for an offline token, which
+    Keycloak refuses with "Offline tokens not allowed" unless the user holds the role.
+    """
+    client = _client("gabro-cli")
+
+    assert "offline_access" not in client["defaultClientScopes"]
+    assert "offline_access" in client["optionalClientScopes"]
+
+
+def test_the_demo_users_may_hold_the_refresh_token_the_cli_needs() -> None:
+    for user in REALM["users"]:
+        assert "offline_access" in user["realmRoles"], user["username"]
+    assert any(role["name"] == "offline_access" for role in REALM["roles"]["realm"])
+
+
+def test_the_development_profile_does_not_duplicate_a_reserved_scope() -> None:
+    """MSAL adds `openid` itself, so naming it again asks for it twice and Keycloak
+    reports the duplicate as an invalid scope.
+    """
+    document = json.loads((DEMO / "gabro-dev-profile.json").read_text(encoding="utf-8"))
+    requested = document["scope"].split()
+
+    assert "openid" not in requested
+    assert requested == ["broker"]
+
+
+def test_the_development_profile_requests_a_scope_the_realm_grants() -> None:
+    document = json.loads((DEMO / "gabro-dev-profile.json").read_text(encoding="utf-8"))
+    client = _client("gabro-cli")
+    assigned = set(client["defaultClientScopes"]) | set(client.get("optionalClientScopes", []))
+
+    for scope in document["scope"].split():
+        assert scope in assigned, scope
+    assert document["scope"] == _broker_environment()["GABRO_OIDC_REQUIRED_SCOPE"]

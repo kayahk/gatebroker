@@ -7,7 +7,7 @@
   ],
   "oidc_authority": "https://localhost:8443/realms/gatebroker-demo",
   "client_id": "gabro-cli",
-  "scope": "openid broker",
+  "scope": "broker",
   "base_url": "http://localhost:8080/v1",
   "gateway_name": "GateBroker demo",
   "ca_bundle": "tls/ca.pem",

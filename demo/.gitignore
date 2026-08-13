@@ -2,4 +2,3 @@
 tls/*.pem
 tls/*.key
 tls/*.srl
-tls/.started-ca

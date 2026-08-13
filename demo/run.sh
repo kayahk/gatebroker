@@ -16,7 +16,6 @@ compose() { docker compose "$@"; }
 case "${1:-check}" in
   down)
     compose --profile smoke down --volumes --remove-orphans
-    rm -f tls/.started-ca
     exit 0
     ;;
   logs)
@@ -31,23 +30,29 @@ case "${1:-check}" in
     ;;
 esac
 
-ca_fingerprint() {
-  openssl x509 -in tls/ca.pem -noout -fingerprint -sha256 2>/dev/null || echo none
-}
-
 ./tls/generate-certs.sh
 
 # A running container keeps the certificate it read at startup, so material reissued
 # underneath it leaves services presenting a chain that no longer matches the CA on
-# disk. Comparing against what the stack was last started with catches that, which
-# comparing the file against itself does not. The mismatch is thoroughly confusing to
-# debug -- a health check that fails on certificate verification while the files on
-# disk look perfectly consistent.
-started_marker="tls/.started-ca"
-recreate=""
-if [ "$(ca_fingerprint)" != "$(cat "${started_marker}" 2>/dev/null || echo none)" ]; then
-  echo "TLS material differs from what the running stack started with; recreating."
-  recreate="--force-recreate"
+# disk. Rather than track provenance -- which missed the case where only the leaf
+# changed -- ask the running service what it is actually presenting and check that it
+# verifies. This is the failure itself, so nothing can slip past it. The mismatch is
+# otherwise thoroughly confusing: a health check failing on certificate verification
+# while every file on disk looks perfectly consistent.
+serves_a_verifiable_chain() {
+  echo | openssl s_client -connect localhost:8443 -CAfile tls/ca.pem 2>/dev/null \
+    | grep -q "Verify return code: 0"
+}
+
+if serves_a_verifiable_chain; then
+  echo "The running identity provider presents a chain that matches the local CA."
+elif compose ps --status running --quiet keycloak 2>/dev/null | grep -q .; then
+  # Tear down rather than recreate. `up --force-recreate <service>` does not recreate
+  # that service's dependencies, so the identity provider would keep serving the
+  # certificate it loaded at startup and the mismatch would survive.
+  echo "The running stack presents a certificate that no longer matches the local CA."
+  echo "Restarting it from scratch so every service loads the current material."
+  compose --profile smoke down --remove-orphans
 fi
 
 echo
@@ -56,7 +61,7 @@ echo "Building and starting the demo. First run pulls images and may take a few 
 # Bound the wait. Without a timeout a container whose health check never passes leaves
 # compose sitting at "Waiting" forever with no indication of what is wrong, so report
 # the failing check instead of hanging.
-if ! compose up --build --detach --wait --wait-timeout 300 ${recreate} gatebroker; then
+if ! compose up --build --detach --wait --wait-timeout 300 gatebroker; then
   echo
   echo "The stack did not become healthy. Last health check output per container:" >&2
   for container in $(compose ps --all --quiet); do
@@ -70,8 +75,6 @@ if ! compose up --build --detach --wait --wait-timeout 300 ${recreate} gatebroke
   echo "Container logs: ./run.sh logs    Start over: ./run.sh down && ./run.sh" >&2
   exit 1
 fi
-
-ca_fingerprint > "${started_marker}"
 
 echo
 echo "Stack is ready. Nothing else to configure:"

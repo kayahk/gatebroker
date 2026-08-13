@@ -13,7 +13,7 @@ import stat
 import subprocess  # nosec B404
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 
@@ -336,13 +336,42 @@ def _acquire_access_token() -> str:
             "Multiple cached accounts were found; run gabro logout, then login."
         )
     if accounts:
-        result = application.acquire_token_silent(scopes=[scope], account=accounts[0])
-        token = result.get("access_token")
+        # Returns None when no cached token matches and the refresh could not be
+        # redeemed, so the reason is fetched alongside it: a silent "please sign in
+        # again" after a successful sign-in is impossible to act on, and the identity
+        # provider usually knows exactly what is wrong.
+        result = application.acquire_token_silent_with_error(
+            scopes=[scope], account=accounts[0]
+        )
+        token = (result or {}).get("access_token")
         if isinstance(token, str) and token:
             _save_cache(cache)
             return token
+        reason = _renewal_failure_reason(result)
+    else:
+        reason = ""
     _save_cache(cache)
-    raise click.ClickException("No valid GateBroker sign-in is available; run gabro login.")
+    raise click.ClickException(
+        f"No valid GateBroker sign-in is available; run gabro login.{reason}"
+    )
+
+
+def _renewal_failure_reason(result: object) -> str:
+    """Summarize why renewal failed, without repeating anything sensitive.
+
+    Only the provider's error code and description are used. Neither carries token or
+    key material, and without them the caller is left guessing.
+    """
+    if not isinstance(result, Mapping):
+        return ""
+    error = result.get("error")
+    description = result.get("error_description")
+    if not isinstance(error, str) or not error:
+        return ""
+    detail = f" The identity provider rejected the renewal: {error}"
+    if isinstance(description, str) and description:
+        detail += f" ({description.splitlines()[0][:200]})"
+    return detail + "."
 
 
 def _version_message() -> str:

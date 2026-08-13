@@ -8,6 +8,10 @@
       {
         "name": "broker-automation",
         "description": "Lets a non-interactive client reach the broker"
+      },
+      {
+        "name": "offline_access",
+        "description": "Permits the refresh token MSAL requests on every renewal."
       }
     ]
   },
@@ -39,6 +43,9 @@
       ],
       "groups": [
         "/engineering"
+      ],
+      "realmRoles": [
+        "offline_access"
       ]
     },
     {
@@ -57,6 +64,9 @@
       ],
       "groups": [
         "/contractors"
+      ],
+      "realmRoles": [
+        "offline_access"
       ]
     },
     {
@@ -73,7 +83,10 @@
           "temporary": false
         }
       ],
-      "groups": []
+      "groups": [],
+      "realmRoles": [
+        "offline_access"
+      ]
     }
   ],
   "clientScopes": [
@@ -145,6 +158,26 @@
           }
         }
       ]
+    },
+    {
+      "name": "profile",
+      "description": "Requested unconditionally by MSAL; declared so scope validation accepts it.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "offline_access",
+      "description": "Requested unconditionally by MSAL; needed for a refresh token.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
     }
   ],
   "clients": [
@@ -178,7 +211,10 @@
         "basic",
         "broker"
       ],
-      "optionalClientScopes": []
+      "optionalClientScopes": [
+        "profile",
+        "offline_access"
+      ]
     }
   ]
 }

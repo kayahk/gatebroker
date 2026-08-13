@@ -113,6 +113,12 @@ services:
       context: ..
       dockerfile: Dockerfile
     network_mode: "service:keycloak"
+    # The broker refuses to start when it cannot fetch signing keys, which is right --
+    # it must not serve traffic it cannot validate. Under an orchestrator that shows up
+    # as a crash-loop that clears itself once the identity provider is back. Compose
+    # has no such behaviour by default, so a provider still restarting would leave the
+    # broker exited for good.
+    restart: on-failure
     environment:
       GABRO_OIDC_ISSUER: https://localhost:8443/realms/gatebroker-demo
       GABRO_OIDC_JWKS_URL: https://localhost:8443/realms/gatebroker-demo/protocol/openid-connect/certs
