@@ -22,10 +22,11 @@ import keyring
 import msal
 from keyring.errors import KeyringError, PasswordDeleteError
 
-from gatebroker import profile
+from gatebroker import __version__, profile
 from gatebroker.codex_launch import augment_codex_command
 from gatebroker.copilot_launch import augment_copilot_environment
 
+_DEV_PROFILE_VARIABLE = "GABRO_DEV_PROFILE"
 CACHE_SERVICE = "gabro"
 CACHE_ACCOUNT = "broker-device-code-cache"
 PROFILE_INTEGRITY_ACCOUNT = "agent-profile-integrity-key"
@@ -344,14 +345,46 @@ def _acquire_access_token() -> str:
     raise click.ClickException("No valid GateBroker sign-in is available; run gabro login.")
 
 
+def _version_message() -> str:
+    """Describe the build and where its coordinates came from.
+
+    Enough to answer "am I running the code I think I am, and which profile is it
+    using", which is otherwise guesswork when a checkout is behind.
+    """
+    if profile.DEVELOPMENT:
+        origin = f"development file {os.environ.get(_DEV_PROFILE_VARIABLE)}"
+    elif profile.CONFIGURED:
+        origin = "compiled into this distribution"
+    else:
+        origin = f"none set; export {_DEV_PROFILE_VARIABLE} or configure profile.py"
+    return "\n".join(
+        (
+            f"gabro {__version__}",
+            f"profile: {origin}",
+            f"gateway: {profile.BASE_URL if profile.CONFIGURED else '-'}",
+            f"code:    {Path(__file__).resolve().parent}",
+        )
+    )
+
+
 @click.group()
+@click.option(
+    "--version",
+    is_flag=True,
+    expose_value=False,
+    is_eager=True,
+    callback=lambda context, _parameter, value: (
+        context.exit(click.echo(_version_message()) or 0) if value else None
+    ),
+    help="Show the version, which profile is in use, and where this build lives.",
+)
 def main() -> None:
     """Authenticate local OpenAI- and Anthropic-compatible tools to a private AI gateway."""
     if profile.DEVELOPMENT:
         # Say so every time. Someone should never be unsure whether the token they
         # just minted came from a reviewed distribution or from a local file.
         click.echo(
-            f"Using the development profile from {os.environ.get('GABRO_DEV_PROFILE')}",
+            f"Using the development profile from {os.environ.get(_DEV_PROFILE_VARIABLE)}",
             err=True,
         )
 

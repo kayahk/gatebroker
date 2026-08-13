@@ -660,3 +660,38 @@ def test_a_profile_that_fails_validation_leaves_the_module_untouched(
 
     assert state() == before
     assert profile.DEVELOPMENT is False
+
+
+def test_version_reports_an_unconfigured_build(monkeypatch) -> None:
+    """`gabro --version` answers "am I running the code I think I am"."""
+    monkeypatch.setattr(profile, "CONFIGURED", False)
+    monkeypatch.setattr(profile, "DEVELOPMENT", False)
+
+    result = CliRunner().invoke(cli.main, ["--version"])
+
+    assert result.exit_code == 0
+    assert cli.__name__.split(".")[0] in result.output or "gabro" in result.output
+    assert "none set" in result.output
+    assert "GABRO_DEV_PROFILE" in result.output
+
+
+def test_version_names_the_development_profile_in_use(monkeypatch, tmp_path) -> None:
+    location = _write_dev_profile(tmp_path)
+    monkeypatch.setenv("GABRO_DEV_PROFILE", location)
+    monkeypatch.setattr(profile, "DEVELOPMENT", True)
+
+    result = CliRunner().invoke(cli.main, ["--version"])
+
+    assert result.exit_code == 0
+    assert location in result.output
+    assert profile.BASE_URL in result.output
+
+
+def test_version_does_not_require_a_configured_profile(monkeypatch) -> None:
+    """It has to work precisely when the CLI otherwise refuses to run."""
+    monkeypatch.setattr(profile, "CONFIGURED", False)
+
+    result = CliRunner().invoke(cli.main, ["--version"])
+
+    assert result.exit_code == 0
+    assert "no distribution profile" not in result.output

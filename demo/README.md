@@ -117,6 +117,16 @@ realm's coordinates and points at the demo CA, and `gabro` prints which profile 
 using on every invocation so you can never be unsure whether a token came from a
 reviewed distribution or from a local file.
 
+If it refuses with "This build has no distribution profile", ask the CLI what it is:
+
+```shell
+uv run gabro --version
+```
+
+That reports the version, which profile is in use, and the directory the code was
+loaded from. A `profile: none set` line with the variable exported almost always means
+the checkout predates this feature, so `git pull` first.
+
 `GABRO_DEV_PROFILE` is read **only** by a build whose `profile.py` is still
 unconfigured, which is what makes it safe. A configured distribution has its
 coordinates compiled in and ignores the variable entirely, so it cannot be used to
