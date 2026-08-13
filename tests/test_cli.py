@@ -610,13 +610,50 @@ def test_rejects_an_unreadable_development_profile(monkeypatch, tmp_path) -> Non
         profile._apply_development_profile()
 
 
-def test_the_shipped_demo_profile_is_valid(monkeypatch) -> None:
-    """The file the demo README tells people to use must actually work."""
-    shipped = Path(__file__).parents[1] / "demo" / "gabro-dev-profile.json"
-    reloaded = _reload_profile(monkeypatch, str(shipped))
+def test_the_shipped_demo_profile_names_the_demo_realm(tmp_path, monkeypatch) -> None:
+    """The file the demo README tells people to use must actually load.
+
+    Its `ca_bundle` points at TLS material the demo generates on first run and does not
+    commit, so the file is copied with that field redirected at a stand-in. Everything
+    else is exactly as shipped.
+    """
+    shipped = json.loads(
+        (Path(__file__).parents[1] / "demo" / "gabro-dev-profile.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert shipped["ca_bundle"] == "tls/ca.pem", "the demo generates its CA here"
+
+    stand_in = tmp_path / "ca.pem"
+    stand_in.write_text("not a real certificate", encoding="utf-8")
+    shipped["ca_bundle"] = str(stand_in)
+    location = tmp_path / "profile.json"
+    location.write_text(json.dumps(shipped), encoding="utf-8")
+
+    reloaded = _reload_profile(monkeypatch, str(location))
     try:
         assert reloaded.DEVELOPMENT is True
-        assert reloaded.OIDC_AUTHORITY.endswith("/realms/gatebroker-demo")
+        assert reloaded.OIDC_AUTHORITY == (
+            "https://localhost:8443/realms/gatebroker-demo"
+        )
         assert reloaded.BASE_URL == "http://localhost:8080/v1"
+        assert reloaded.CLIENT_ID == "gabro-cli"
+        assert reloaded.default_model() == "demo-small"
     finally:
         _reload_profile(monkeypatch, None)
+
+
+def test_a_profile_that_fails_validation_leaves_the_module_untouched(
+    tmp_path, monkeypatch
+) -> None:
+    """Partial application would leave some values from the file and some defaults."""
+    location = _write_dev_profile(tmp_path, ca_bundle=str(tmp_path / "absent.pem"))
+    monkeypatch.setenv("GABRO_DEV_PROFILE", location)
+    monkeypatch.setattr(profile, "CONFIGURED", False)
+    before = (profile.MODELS, profile.CLIENT_ID, profile.BASE_URL, profile.CA_BUNDLE)
+
+    with pytest.raises(RuntimeError, match="ca_bundle"):
+        profile._apply_development_profile()
+
+    assert (profile.MODELS, profile.CLIENT_ID, profile.BASE_URL, profile.CA_BUNDLE) == before
+    assert profile.DEVELOPMENT is False

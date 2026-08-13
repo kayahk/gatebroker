@@ -117,15 +117,8 @@ def _apply_development_profile() -> None:
             f"{_DEVELOPMENT_PROFILE_VARIABLE} models must be [id, label] pairs"
         ) from error
 
-    TENANT_ID = str(document.get("tenant_id") or "")
-    OIDC_AUTHORITY = str(document.get("oidc_authority") or "")
-    CLIENT_ID = str(document["client_id"])
-    SCOPE = str(document["scope"])
-    BASE_URL = str(document["base_url"])
-    GATEWAY_NAME = str(document.get("gateway_name") or "GateBroker")
-    MODELS = parsed
-    # Resolved against the profile's own directory, so a profile can name a CA
-    # sitting next to it without depending on the working directory.
+    # Resolved against the profile's own directory, so a profile can name a CA sitting
+    # next to it without depending on the working directory.
     bundle = str(document.get("ca_bundle") or "")
     if bundle:
         resolved = Path(bundle)
@@ -133,7 +126,19 @@ def _apply_development_profile() -> None:
             resolved = Path(location).parent / resolved
         if not resolved.is_file():
             raise RuntimeError(f"{_DEVELOPMENT_PROFILE_VARIABLE} ca_bundle is unreadable")
-        CA_BUNDLE = str(resolved)
+        bundle = str(resolved)
+
+    # Nothing above this line touches module state. A profile that fails validation
+    # half way through would otherwise leave the module carrying some of its values
+    # and some of the defaults, which is both unsafe and confusing to debug.
+    TENANT_ID = str(document.get("tenant_id") or "")
+    OIDC_AUTHORITY = str(document.get("oidc_authority") or "")
+    CLIENT_ID = str(document["client_id"])
+    SCOPE = str(document["scope"])
+    BASE_URL = str(document["base_url"])
+    GATEWAY_NAME = str(document.get("gateway_name") or "GateBroker")
+    MODELS = parsed
+    CA_BUNDLE = bundle
     DEVELOPMENT = True
     CONFIGURED = True
 
