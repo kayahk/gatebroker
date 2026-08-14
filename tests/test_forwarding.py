@@ -1992,3 +1992,84 @@ def test_create_app_refuses_an_unusable_size_bound(bound: object) -> None:
             rate_limiter=lambda _key: True,
             max_request_bytes=bound,
         )
+
+
+def _get(app, path: str, headers: dict[str, str] | None = None):
+    async def send():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://broker") as client:
+            return await client.get(path, headers=headers or {})
+
+    return asyncio.run(send())
+
+
+def test_models_lists_only_what_the_callers_policy_allows() -> None:
+    """So a client never has to carry its own copy of the model list."""
+    calls = 0
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    response = _get(
+        app_with_upstream(upstream), "/v1/models", {"Authorization": "Bearer client-token"}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["object"] == "list"
+    assert [entry["id"] for entry in payload["data"]] == ["gpt-4o-mini"]
+    # Answered from the policy, so the gateway is never contacted and no key is needed.
+    assert calls == 0
+
+
+def test_models_never_reveals_another_policys_models() -> None:
+    response = _get(
+        app_with_upstream(lambda _request: httpx.Response(200)),
+        "/v1/models",
+        {"Authorization": "Bearer client-token"},
+    )
+
+    assert "gpt-4o" not in {entry["id"] for entry in response.json()["data"]}
+
+
+def test_models_requires_a_valid_token() -> None:
+    app = app_with_upstream(lambda _request: httpx.Response(200))
+
+    assert _get(app, "/v1/models").status_code == 401
+    assert _get(app, "/v1/models", {"Authorization": "Bearer"}).status_code == 401
+    assert _get(app, "/v1/models", {"Authorization": "Basic tok"}).status_code == 401
+
+
+def test_models_denies_a_caller_who_resolves_to_no_policy() -> None:
+    def unentitled(token: str) -> dict[str, object]:
+        return {**verified_claims(token), "groups": ["group-unknown"]}
+
+    response = _get(
+        app_with_upstream(lambda _request: httpx.Response(200), verifier=unentitled),
+        "/v1/models",
+        {"Authorization": "Bearer client-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["message"] == "request denied"
+
+
+def test_models_is_audited_without_disclosing_the_caller(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        _get(
+            app_with_upstream(lambda _request: httpx.Response(200)),
+            "/v1/models",
+            {"Authorization": "Bearer client-token"},
+        )
+
+    records = [record.getMessage() for record in caplog.records if record.name == "uvicorn.error"]
+    assert len(records) == 1
+    event = json.loads(records[0])
+    assert event["outcome"] == "models_listed"
+    assert event["path"] == "/v1/models"
+    assert event["policy_id"] == "researchers"
+    assert "subject-123" not in records[0]

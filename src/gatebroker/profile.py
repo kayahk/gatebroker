@@ -58,6 +58,33 @@ _DEVELOPMENT_PROFILE_VARIABLE = "GABRO_DEV_PROFILE"
 _REQUIRED_KEYS = frozenset({"client_id", "scope", "base_url"})
 
 
+def primary_model() -> str:
+    """The model an agent should use for its main work.
+
+    A fallback only: what a caller may actually use comes from their entitlement policy,
+    read at launch. This decides which of the permitted models to prefer, and is the
+    answer when that lookup fails.
+    """
+    return default_model()
+
+
+def small_fast_model() -> str:
+    """A cheaper model for background work such as summarising and titling.
+
+    Agents that distinguish the two -- Claude Code among them -- fail quietly on
+    background requests if this names something the policy does not allow. Declared as
+    the last entry in MODELS, so order the list from most to least capable.
+    """
+    if not MODELS:
+        raise RuntimeError("profile.MODELS must list at least one gateway model")
+    return MODELS[-1][0]
+
+
+def model_preference() -> tuple[str, ...]:
+    """The declared models in preference order, most preferred first."""
+    return tuple(slug for slug, _label in MODELS)
+
+
 def default_model() -> str:
     """Return the model a local agent selects when the user names none."""
     if not MODELS:

@@ -23,8 +23,10 @@ import msal
 from keyring.errors import KeyringError, PasswordDeleteError
 
 from gatebroker import __version__, profile
-from gatebroker.codex_launch import augment_codex_command
-from gatebroker.copilot_launch import augment_copilot_environment
+from gatebroker.claude_launch import augment_claude_environment, is_claude_command
+from gatebroker.codex_launch import augment_codex_command, is_codex_command
+from gatebroker.copilot_launch import augment_copilot_environment, is_copilot_command
+from gatebroker.model_discovery import allowed_models
 
 _DEV_PROFILE_VARIABLE = "GABRO_DEV_PROFILE"
 CACHE_SERVICE = "gabro"
@@ -512,6 +514,15 @@ def logout() -> None:
         raise click.ClickException("The operating-system credential store is unavailable.") from error
 
 
+def _selects_a_model(command: Sequence[str]) -> bool:
+    """Report whether this agent needs a gateway model id named for it."""
+    return (
+        is_claude_command(command)
+        or is_codex_command(command)
+        or is_copilot_command(command)
+    )
+
+
 def _run_with_broker_environment(command: Sequence[str]) -> None:
     """Start one command with the token and gateway endpoint kept process-local."""
     _tenant_id, _client_id, _scope, base_url = _settings()
@@ -528,12 +539,24 @@ def _run_with_broker_environment(command: Sequence[str]) -> None:
         base_url=base_url,
         token=environment["OPENAI_API_KEY"],
     )
+    # Ask the broker what this user may use. The entitlement policy is the only place a
+    # model list is declared, and the broker resolves one policy per caller, so this is
+    # the only way to avoid carrying a stale copy here. Only asked for agents whose model
+    # has to be named; there is no reason to make the request otherwise.
+    available: tuple[str, ...] = ()
+    if _selects_a_model(command):
+        available = allowed_models(base_url=base_url, token=environment["OPENAI_API_KEY"])
+    # Claude Code reaches the gateway from ANTHROPIC_BASE_URL alone, but defaults to
+    # Anthropic's own model ids, which a policy is unlikely to list. Name allowed models
+    # instead, or every request is refused with a generic 403.
+    environment = augment_claude_environment(command, environment, available_models=available)
     # Codex ignores OPENAI_BASE_URL for provider/model selection; inject reviewed
     # non-secret -c overrides so gateway models appear instead of OpenAI defaults.
     launch_command = augment_codex_command(
         command,
         base_url=base_url,
         config_dir=_agents_file().parent,
+        available=available,
     )
     try:
         # The configured argv is passed directly and never interpreted by a shell.

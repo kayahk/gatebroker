@@ -39,6 +39,8 @@ or try to be a gateway itself.
 
 - Accepts `POST /v1/chat/completions`, `/v1/embeddings`, `/v1/responses`
   (OpenAI Responses), and `/v1/messages` (Anthropic Messages).
+- Answers `GET /v1/models` with the models the caller's own policy allows, so a
+  client never has to carry its own copy of the list.
 - Validates issuer, audience, lifetime, subject, groups, and a delegated scope or
   app role, after signature verification against a periodically refreshed JWKS
   snapshot.

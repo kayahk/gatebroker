@@ -43,6 +43,18 @@ allowlisted `detail`. The value is always drawn from a fixed set — for example
 `upstream_json_error`, `upstream_plaintext_error`, or
 `upstream_error_body_unavailable`. Raw upstream text is never copied into it.
 
+## Telling a client what it may use
+
+`GET /v1/models` answers from the caller's resolved policy: same authentication and
+entitlement path as the forwarding routes, no upstream call, no server-side key, and never
+another policy's models. It exists so a local agent does not carry its own copy of the
+model list, which drifts from the policy and pins people to a subset of what they are
+entitled to.
+
+It discloses nothing a caller could not already learn by trying a model and comparing 200
+against 403. A caller who resolves to no policy is refused, exactly as they are for a
+completion.
+
 ## Common failures, in the order worth checking
 
 **The pod never becomes ready.** `GET /readyz` succeeds only while the JWKS

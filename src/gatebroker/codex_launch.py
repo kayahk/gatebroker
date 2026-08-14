@@ -56,35 +56,63 @@ def codex_home() -> Path:
     return Path.home() / ".codex"
 
 
+def _label_for(slug: str) -> str:
+    """Derive a label for a model the policy allows but this build has not heard of."""
+    return slug.rsplit("/", 1)[-1]
+
+
+def _catalog_entries(available: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    """Pair each allowed model with a label, preferring the profile's own labels."""
+    if not available:
+        return APPROVED_CODEX_MODELS
+    known = dict(APPROVED_CODEX_MODELS)
+    return tuple((slug, known.get(slug) or _label_for(slug)) for slug in available)
+
+
 def catalog_file(config_dir: Path) -> Path:
     """Return the path of the non-secret catalog written under the gabro config dir."""
     return config_dir / CODEX_CATALOG_FILENAME
 
 
-def ensure_codex_model_catalog(config_dir: Path) -> Path:
+def ensure_codex_model_catalog(config_dir: Path, available: tuple[str, ...] = ()) -> Path:
     """Write/update the local Codex model catalog and return its path."""
     path = catalog_file(config_dir)
-    document = {"models": _catalog_models(codex_home() / "models_cache.json")}
+    document = {
+        "models": _catalog_models(
+            codex_home() / "models_cache.json", _catalog_entries(available)
+        )
+    }
     _atomic_write_json(path, document)
     return path
 
 
-def augment_codex_command(command: Sequence[str], *, base_url: str, config_dir: Path) -> list[str]:
+def augment_codex_command(
+    command: Sequence[str],
+    *,
+    base_url: str,
+    config_dir: Path,
+    available: tuple[str, ...] = (),
+) -> list[str]:
     """Return command with Codex gateway provider/catalog overrides injected."""
     if not is_codex_command(command):
         return list(command)
-    catalog_path = ensure_codex_model_catalog(config_dir)
-    overrides = _cli_overrides(base_url=base_url, catalog_path=catalog_path)
+    catalog_path = ensure_codex_model_catalog(config_dir, available)
+    entries = _catalog_entries(available)
+    overrides = _cli_overrides(
+        base_url=base_url, catalog_path=catalog_path, default_model=entries[0][0]
+    )
     return [command[0], *overrides, *command[1:]]
 
 
-def _cli_overrides(*, base_url: str, catalog_path: Path) -> list[str]:
+def _cli_overrides(
+    *, base_url: str, catalog_path: Path, default_model: str = DEFAULT_CODEX_MODEL
+) -> list[str]:
     provider_prefix = f"model_providers.{CODEX_PROVIDER_ID}"
     return [
         "-c",
         f'model_provider="{CODEX_PROVIDER_ID}"',
         "-c",
-        f'model="{DEFAULT_CODEX_MODEL}"',
+        f'model="{default_model}"',
         "-c",
         f'model_catalog_json="{catalog_path}"',
         "-c",
@@ -98,10 +126,12 @@ def _cli_overrides(*, base_url: str, catalog_path: Path) -> list[str]:
     ]
 
 
-def _catalog_models(models_cache_path: Path) -> list[dict[str, Any]]:
+def _catalog_models(
+    models_cache_path: Path, entries: tuple[tuple[str, str], ...]
+) -> list[dict[str, Any]]:
     template = _template_model(models_cache_path)
     models: list[dict[str, Any]] = []
-    for index, (slug, display_name) in enumerate(APPROVED_CODEX_MODELS, start=1):
+    for index, (slug, display_name) in enumerate(entries, start=1):
         if template is None:
             models.append(_fallback_model(slug, display_name, priority=index))
             continue

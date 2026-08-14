@@ -84,6 +84,19 @@ def chat(model: str) -> dict[str, Any]:
     return {"model": model, "messages": [{"role": "user", "content": "ping"}]}
 
 
+def list_models(token: str | None) -> tuple[int, list[str]]:
+    headers = {"Accept": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(f"{BROKER}/v1/models", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310
+            payload = json.load(response)
+        return response.status, [entry["id"] for entry in payload.get("data", [])]
+    except urllib.error.HTTPError as error:
+        return error.code, []
+
+
 def main() -> int:
     print("\n== an entitled user reaches an allowed model ==")
     alice = token_for("alice")
@@ -145,6 +158,31 @@ def main() -> int:
     print("\n== unsupported endpoints are not proxied ==")
     status, _ = call_broker("/v1/completions", alice, chat("demo-small"))
     check("a path the broker does not implement is not reachable", status == 404)
+
+    print("\n== each caller can read the models their own policy allows ==")
+    # This is what lets a client stop carrying its own copy of the model list.
+    status, alice_models = list_models(alice)
+    check("alice can list her models", status == 200, f"status {status}")
+    check(
+        "she is told both models her policy allows",
+        alice_models == ["demo-large", "demo-small"],
+        str(alice_models),
+    )
+    status, bob_models = list_models(bob)
+    check(
+        "bob is told only the one his policy allows",
+        status == 200 and bob_models == ["demo-small"],
+        f"status {status} {bob_models}",
+    )
+    check(
+        "bob is not told about the model he may not use",
+        "demo-large" not in bob_models,
+        str(bob_models),
+    )
+    status, _ = list_models(carol)
+    check("carol, who resolves to no policy, is refused", status == 403, f"status {status}")
+    status, _ = list_models(None)
+    check("an unauthenticated caller is refused", status == 401, f"status {status}")
 
     print("\n== health endpoints disclose nothing ==")
     with urllib.request.urlopen(f"{BROKER}/healthz", timeout=10) as response:  # nosec B310

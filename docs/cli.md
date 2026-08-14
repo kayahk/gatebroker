@@ -137,6 +137,37 @@ choosing.
 `configure` does not touch an agent's own provider configuration and never writes
 credential material into it.
 
+## Claude Code
+
+Launching Claude through `gabro` needs nothing extra:
+
+```shell
+gabro configure claude -- claude
+gabro login
+gabro run claude
+```
+
+Claude Code reads the gateway address and credential from `ANTHROPIC_BASE_URL` and
+`ANTHROPIC_AUTH_TOKEN`, which `gabro` supplies to the child process. Its model ids are the
+part that needs help: Claude Code defaults to Anthropic's own names, which an entitlement
+policy is unlikely to list, so the broker refuses every request with a generic `403` and
+nothing points at the model as the cause. `gabro` therefore asks the broker which models
+*this* user may use — `GET /v1/models`, answered from the caller's resolved policy — and
+sets both of the variables Claude Code reads:
+
+- `ANTHROPIC_MODEL` — the session model.
+- `ANTHROPIC_SMALL_FAST_MODEL` — the cheaper model used for background work such as
+  summarising and titling.
+
+Both matter. With only the session model set, the session looks healthy while background
+requests fail on their own.
+
+Because the list comes from the policy rather than from `gabro`, a policy that grows a
+model grants it without a new release, and nobody is pinned to a subset of what they are
+entitled to. Export either variable to pin a different allowed model and `gabro` keeps
+your value. If the lookup fails, `gabro` falls back to the profile's models and still
+starts the agent.
+
 ## Clients that ignore `OPENAI_BASE_URL`
 
 Some agents do not treat `OPENAI_BASE_URL` as a provider switch, so `gabro`
@@ -144,8 +175,8 @@ injects the equivalent non-secret settings for them:
 
 **Codex** uses the OpenAI Responses path. `gabro` passes `-c` overrides that point
 a custom provider at the gateway and install a local model catalog, so the
-`/model` picker lists the gateway's models instead of the built-in presets. The
-catalog is non-secret; the token still only reaches the process environment.
+`/model` picker lists the models the caller's own policy allows instead of the built-in
+presets. The catalog is non-secret; the token still only reaches the process environment.
 
 **GitHub Copilot CLI** selects a custom endpoint through its own
 `COPILOT_PROVIDER_*` "bring your own key" variables, which `gabro` sets for the

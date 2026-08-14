@@ -27,3 +27,16 @@ if os.environ.pop("GABRO_DEV_PROFILE", None) is not None:
 @pytest.fixture(autouse=True)
 def configured_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(profile, "CONFIGURED", True)
+
+
+@pytest.fixture(autouse=True)
+def no_model_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model discovery talks to the broker; tests must not.
+
+    A test that cares about it patches `cli.allowed_models` itself. Without this every
+    launch test attempts a real request to the profile's gateway, which makes the suite
+    slow and dependent on where it runs.
+    """
+    import gatebroker.cli as cli
+
+    monkeypatch.setattr(cli, "allowed_models", lambda **_kwargs: ())

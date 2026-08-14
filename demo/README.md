@@ -28,6 +28,7 @@ removes it, `./run.sh logs` follows output.
 == a client cannot supply its own gateway credential or identity ==
 == the model must exist in the policy, not merely at the gateway ==
 == unsupported endpoints are not proxied ==
+== each caller can read the models their own policy allows ==
 == health endpoints disclose nothing ==
 ```
 

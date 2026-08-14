@@ -22,7 +22,9 @@ KeyResolver = Callable[[str], str]
 RateLimitKey = tuple[str, str, str]
 RateLimiter = Callable[[RateLimitKey], bool]
 
-_SUPPORTED_PATHS = frozenset({"/v1/chat/completions", "/v1/embeddings", "/v1/messages", "/v1/responses"})
+_SUPPORTED_PATHS = frozenset(
+    {"/v1/chat/completions", "/v1/embeddings", "/v1/messages", "/v1/models", "/v1/responses"}
+)
 _ALLOWED_FIELDS: Mapping[str, frozenset[str]] = {
     "/v1/chat/completions": frozenset(
         {
@@ -197,6 +199,78 @@ def create_app(
         **({} if ssl_context is None else {"verify": ssl_context}),
     )
     app.router.on_shutdown.append(upstream_client.aclose)
+
+    @app.get("/v1/models")
+    async def list_models(request: Request) -> Response:
+        """Report the models the caller's own entitlement policy allows.
+
+        Answered from the resolved policy, without calling the upstream gateway: the
+        policy *is* the answer, so this needs no server-side key and cannot be used to
+        probe the gateway. It discloses nothing a caller could not already learn by
+        trying a model and comparing 200 against 403, and never mentions another
+        policy's models.
+
+        It exists so a client does not have to carry its own copy of the model list. A
+        local agent that hardcodes one drifts from the entitlement as soon as the policy
+        changes, and pins users to a subset of what they are allowed.
+        """
+        path = request.url.path
+        started_at = time.perf_counter()
+
+        authorization = request.headers.getlist("authorization")
+        token = _bearer_token(authorization[0]) if len(authorization) == 1 else None
+        if token is None:
+            _audit_event(
+                outcome="authentication_failed", path=path, status_code=401, started_at=started_at
+            )
+            return _error(401, "authentication failed")
+
+        try:
+            identity = await run_in_threadpool(
+                validate_access_token,
+                token,
+                oidc_config,
+                token_verifier,
+                now=time.time(),
+            )
+        except Exception as error:
+            _audit_event(
+                outcome="authentication_failed",
+                path=path,
+                status_code=401,
+                started_at=started_at,
+                detail=type(error).__name__,
+            )
+            return _error(401, "authentication failed")
+
+        try:
+            policy = resolve_entitlement(
+                policies=policies,
+                token_group_ids=set(identity.group_ids),
+                token_app_roles=set(identity.app_roles),
+            )
+        except EntitlementResolutionError:
+            _audit_event(
+                outcome="authorization_denied", path=path, status_code=403, started_at=started_at
+            )
+            return _error(403, "request denied")
+
+        _audit_event(
+            outcome="models_listed",
+            path=path,
+            status_code=200,
+            started_at=started_at,
+            policy_id=policy.id,
+        )
+        return JSONResponse(
+            {
+                "object": "list",
+                "data": [
+                    {"id": model, "object": "model", "owned_by": "gateway"}
+                    for model in sorted(policy.allowed_models)
+                ],
+            }
+        )
 
     @app.post("/v1/chat/completions")
     @app.post("/v1/embeddings")

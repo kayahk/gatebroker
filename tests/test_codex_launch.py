@@ -75,7 +75,9 @@ def test_catalog_models_shallow_copies_template_metadata(tmp_path, monkeypatch) 
     }
     monkeypatch.setattr(codex_launch, "_template_model", lambda _: template)
 
-    models = codex_launch._catalog_models(tmp_path / "models_cache.json")
+    models = codex_launch._catalog_models(
+        tmp_path / "models_cache.json", codex_launch.APPROVED_CODEX_MODELS
+    )
 
     assert models[0]["nested_metadata"] is nested_metadata
 
