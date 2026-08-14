@@ -82,7 +82,14 @@ def app_with_upstream(
     key_resolver: Callable[[str], str] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     rate_limiter: Callable[[tuple[str, str, str]], bool] | None = None,
+    max_request_bytes: int | None = None,
+    max_response_bytes: int | None = None,
 ):
+    bounds = {}
+    if max_request_bytes is not None:
+        bounds["max_request_bytes"] = max_request_bytes
+    if max_response_bytes is not None:
+        bounds["max_response_bytes"] = max_response_bytes
     return create_app(
         oidc_config=config(),
         token_verifier=verifier,
@@ -92,6 +99,7 @@ def app_with_upstream(
         key_resolver=key_resolver or (lambda _name: "test-policy-key"),
         rate_limiter=rate_limiter or (lambda _key: True),
         transport=transport or httpx.MockTransport(upstream),
+        **bounds,
     )
 
 
@@ -1169,12 +1177,15 @@ def test_rebuilds_body_and_headers_without_client_controlled_routing_data() -> N
 
 
 class _OverLimitRequestStream(httpx.AsyncByteStream):
-    def __init__(self) -> None:
+    """Yields one byte more than the configured bound, then fails if read again."""
+
+    def __init__(self, limit: int) -> None:
         self.chunks_yielded = 0
+        self._limit = limit
 
     async def __aiter__(self):
         self.chunks_yielded += 1
-        yield b"x" * 1_048_576
+        yield b"x" * self._limit
         self.chunks_yielded += 1
         yield b"x"
         raise AssertionError("broker read beyond the request limit")
@@ -1191,9 +1202,10 @@ def test_stops_consuming_chunked_body_when_request_limit_is_exceeded() -> None:
         calls += 1
         return httpx.Response(200)
 
-    stream = _OverLimitRequestStream()
+    limit = 4096
+    stream = _OverLimitRequestStream(limit)
     response = post(
-        app_with_upstream(upstream),
+        app_with_upstream(upstream, max_request_bytes=limit),
         "/v1/chat/completions",
         headers={"Authorization": "Bearer client-token", "Content-Type": "application/json"},
         content=stream,
@@ -1911,3 +1923,72 @@ def test_accepts_a_tls_upstream_on_any_port(base_url: str) -> None:
     )
 
     assert response.status_code == 200
+
+
+def test_a_request_within_the_configured_bound_is_forwarded() -> None:
+    upstream_requests: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    # Comfortably larger than the old megabyte bound, which is the point of raising it.
+    padding = "p" * 2_000_000
+    response = post(
+        app_with_upstream(upstream),
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer client-token"},
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": padding}]},
+    )
+
+    assert response.status_code == 200
+    assert len(upstream_requests) == 1
+
+
+def test_a_request_over_the_configured_bound_is_refused_without_calling_upstream() -> None:
+    calls = 0
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    response = post(
+        app_with_upstream(upstream, max_request_bytes=2048),
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer client-token"},
+        json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "p" * 4096}]},
+    )
+
+    assert response.status_code == 400
+    assert calls == 0
+
+
+def test_a_response_over_the_configured_bound_is_refused() -> None:
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"r" * 8192)
+
+    response = post(
+        app_with_upstream(upstream, max_response_bytes=4096),
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer client-token"},
+        json={"model": "gpt-4o-mini", "messages": []},
+    )
+
+    assert response.status_code == 502
+
+
+@pytest.mark.parametrize("bound", [0, -1, 512, forwarding.MAX_CONFIGURABLE_BYTES + 1, True])
+def test_create_app_refuses_an_unusable_size_bound(bound: object) -> None:
+    """A library caller gets the same protection as a deployment."""
+    with pytest.raises(ValueError, match="max_request_bytes"):
+        create_app(
+            oidc_config=config(),
+            token_verifier=verified_claims,
+            policies_json=POLICIES,
+            upstream_base_url="https://gateway.internal",
+            trusted_upstream_hosts=frozenset({"gateway.internal"}),
+            key_resolver=lambda _name: "test-policy-key",
+            rate_limiter=lambda _key: True,
+            max_request_bytes=bound,
+        )

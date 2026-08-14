@@ -748,3 +748,68 @@ def test_rejects_an_unreadable_ca_bundle_at_startup(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="GABRO_TLS_CA_BUNDLE"):
         load_runtime_settings(environment)
+
+
+def test_size_bounds_default_to_ten_mebibytes_each(tmp_path: Path) -> None:
+    """A megabyte request bound refused ordinary image and document payloads, which
+    base64 inflates by roughly a third.
+    """
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+
+    settings = load_runtime_settings(runtime_environment(policy_path))
+
+    assert settings.max_request_bytes == 10_485_760
+    assert settings.max_response_bytes == 10_485_760
+
+
+def test_size_bounds_are_configurable(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = runtime_environment(policy_path)
+    environment["GABRO_MAX_REQUEST_BYTES"] = "20971520"
+    environment["GABRO_MAX_RESPONSE_BYTES"] = "5242880"
+
+    settings = load_runtime_settings(environment)
+
+    assert settings.max_request_bytes == 20_971_520
+    assert settings.max_response_bytes == 5_242_880
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "0",
+        "-1",
+        "not-a-number",
+        "1.5",
+        "512",  # below the floor: too small to carry a usable request
+        "104857601",  # above the ceiling
+        "",
+    ],
+)
+def test_rejects_a_size_bound_outside_the_supported_range(tmp_path: Path, value: str) -> None:
+    """A bound is a memory defence, so a mistyped one must fail at startup."""
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = runtime_environment(policy_path)
+    environment["GABRO_MAX_REQUEST_BYTES"] = value
+
+    with pytest.raises(RuntimeError, match="GABRO_MAX_REQUEST_BYTES"):
+        load_runtime_settings(environment)
+
+
+def test_the_configured_bounds_reach_the_application(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    environment = runtime_environment(policy_path)
+    environment["GABRO_MAX_REQUEST_BYTES"] = "2048"
+    settings = load_runtime_settings(environment)
+
+    app = runtime.create_runtime_app(
+        settings,
+        token_verifier=lambda _token: {},
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+    )
+
+    assert app is not None

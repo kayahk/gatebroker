@@ -72,8 +72,13 @@ _ENDPOINT_REQUEST_HEADERS: Mapping[str, frozenset[str]] = {
     "/v1/messages": frozenset({"anthropic-version", "anthropic-beta"}),
 }
 _SAFE_RESPONSE_HEADERS = frozenset({"content-type", "request-id", "x-request-id"})
-_MAX_REQUEST_BYTES = 1_048_576
-_MAX_RESPONSE_BYTES = 10_485_760
+DEFAULT_MAX_REQUEST_BYTES = 10_485_760
+DEFAULT_MAX_RESPONSE_BYTES = 10_485_760
+# A request body is read into memory before it is parsed, so the memory a hostile
+# caller can pin is this bound multiplied by the number of concurrent requests. The
+# ceiling exists so that a mistyped setting cannot turn a refusal into an outage;
+# choosing a value near it still requires thinking about concurrency.
+MAX_CONFIGURABLE_BYTES = 104_857_600
 # Generous for a request that carries nested tool or response schemas, and far
 # below what would threaten the parser.
 _MAX_JSON_DEPTH = 64
@@ -159,9 +164,13 @@ def create_app(
     transport: httpx.AsyncBaseTransport | None = None,
     allow_cluster_local_plaintext_upstream: bool = False,
     ssl_context: ssl.SSLContext | None = None,
+    max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
 ) -> FastAPI:
     """Create a broker that authenticates, selects one policy, and forwards safely."""
     policies = load_policies(policies_json)
+    max_request_bytes = _validated_byte_bound(max_request_bytes, "max_request_bytes")
+    max_response_bytes = _validated_byte_bound(max_response_bytes, "max_response_bytes")
     if not isinstance(upstream_base_url, str) or not upstream_base_url:
         raise ValueError("upstream configuration is required")
     if not trusted_upstream_hosts:
@@ -239,7 +248,7 @@ def create_app(
                 detail=type(error).__name__,
             )
 
-        body = await _request_object(request)
+        body = await _request_object(request, max_request_bytes)
         if (
             body is None
             or not _valid_model(body)
@@ -302,12 +311,14 @@ def create_app(
                 return audited_error(upstream.status_code, "upstream request failed", "upstream_failed", policy_id=policy.id, model=model, detail=detail)
             if body.get("stream") is True:
                 return StreamingResponse(
-                    _relay_stream(upstream, path, started_at, policy.id, model),
+                    _relay_stream(
+                        upstream, path, started_at, policy.id, model, max_response_bytes
+                    ),
                     status_code=upstream.status_code,
                     headers=_safe_response_headers(upstream),
                 )
             try:
-                content = await _bounded_response_content(upstream)
+                content = await _bounded_response_content(upstream, max_response_bytes)
             finally:
                 await upstream.aclose()
             if content is None:
@@ -339,12 +350,13 @@ async def _relay_stream(
     started_at: float,
     policy_id: str,
     model: str,
+    max_response_bytes: int,
 ) -> AsyncIterator[bytes]:
     received = 0
     try:
         async for chunk in upstream.aiter_bytes():
             received += len(chunk)
-            if received > _MAX_RESPONSE_BYTES:
+            if received > max_response_bytes:
                 _audit_event(outcome="upstream_failed", path=path, status_code=502, started_at=started_at, policy_id=policy_id, model=model, detail="upstream response exceeded the size limit")
                 return
             yield chunk
@@ -426,11 +438,11 @@ def _bearer_token(value: str | None) -> str | None:
     return token
 
 
-async def _request_object(request: Request) -> dict[str, Any] | None:
+async def _request_object(request: Request, max_request_bytes: int) -> dict[str, Any] | None:
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
-            if int(content_length) > _MAX_REQUEST_BYTES:
+            if int(content_length) > max_request_bytes:
                 return None
         except ValueError:
             return None
@@ -439,7 +451,7 @@ async def _request_object(request: Request) -> dict[str, Any] | None:
         received = 0
         async for chunk in request.stream():
             received += len(chunk)
-            if received > _MAX_REQUEST_BYTES:
+            if received > max_request_bytes:
                 return None
             chunks.append(chunk)
         raw_body = b"".join(chunks)
@@ -449,6 +461,22 @@ async def _request_object(request: Request) -> dict[str, Any] | None:
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, MemoryError):
         return None
     return body if isinstance(body, dict) else None
+
+
+def _validated_byte_bound(value: int, name: str) -> int:
+    """Reject a bound that is not a usable size.
+
+    The caps are a memory defence, so an unbounded or nonsensical value would convert
+    a refusal into an outage. Rejecting at construction keeps that from being a runtime
+    surprise on the first large request.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be a positive integer")
+    if value < 1024:
+        raise ValueError(f"{name} must be at least 1024 bytes")
+    if value > MAX_CONFIGURABLE_BYTES:
+        raise ValueError(f"{name} must not exceed {MAX_CONFIGURABLE_BYTES} bytes")
+    return value
 
 
 def _exceeds_max_json_depth(raw_body: bytes) -> bool:
@@ -704,12 +732,12 @@ def _sanitize_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-async def _bounded_response_content(response: httpx.Response) -> bytes | None:
+async def _bounded_response_content(response: httpx.Response, max_response_bytes: int) -> bytes | None:
     chunks: list[bytes] = []
     received = 0
     async for chunk in response.aiter_bytes():
         received += len(chunk)
-        if received > _MAX_RESPONSE_BYTES:
+        if received > max_response_bytes:
             return None
         chunks.append(chunk)
     return b"".join(chunks)

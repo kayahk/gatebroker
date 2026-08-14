@@ -49,7 +49,7 @@ or try to be a gateway itself.
   contain key *names*, never values.
 - Strips client credentials, routing, and identity headers, then attributes the
   request to the verified caller for the upstream's own accounting.
-- Relays bounded SSE streams, and caps request and response sizes.
+- Relays bounded SSE streams, and caps request and response sizes, both configurable.
 - Emits one JSON audit event per request containing no tokens, prompts, bodies,
   subject ids, IP addresses, or keys.
 
@@ -236,6 +236,8 @@ non-Microsoft provider working before committing to one.
 | `GABRO_RATE_LIMIT_REQUESTS` | no | Requests per window (default 60) |
 | `GABRO_RATE_LIMIT_WINDOW_SECONDS` | no | Window length (default 60) |
 | `GABRO_RATE_LIMIT_MAX_KEYS` | no | Tracked limiter keys (default 10000) |
+| `GABRO_MAX_REQUEST_BYTES` | no | Largest accepted request (default 10485760, max 104857600) |
+| `GABRO_MAX_RESPONSE_BYTES` | no | Largest relayed response (default 10485760, max 104857600) |
 | `GABRO_UPSTREAM_ALLOW_CLUSTER_LOCAL_PLAINTEXT` | no | Permit `http://` to in-cluster Service DNS only |
 
 A `key_ref` is a name, never a value. Keep key material out of policy documents,
@@ -252,7 +254,9 @@ mean twice the limit. Inject a shared limiter before scaling out.
 instead of the group list, the request is denied rather than resolved through a
 directory lookup the broker is not configured to make.
 
-**Sizes are capped** at 1 MiB per request and 10 MiB per response.
+**Sizes are capped** at 10 MiB per request and per response, adjustable up to 100 MiB.
+A request body is read into memory before parsing, so what a hostile caller can pin is
+the bound times the number of concurrent requests. Raise it deliberately.
 
 **The broker is not a network control.** It only helps if callers cannot reach the
 gateway directly; enforce that with network policy.

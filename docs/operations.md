@@ -77,6 +77,25 @@ identity. Check network policy first: a broker that reaches the gateway through 
 mesh or hairpin usually keeps its own pod identity, so a rule that authorizes
 "ingress" in general will not authorize this source.
 
+## Request and response size
+
+Both are capped at 10 MiB by default and set with `GABRO_MAX_REQUEST_BYTES` and
+`GABRO_MAX_RESPONSE_BYTES`, up to 100 MiB. An over-sized request is refused as a generic
+`400` before the gateway is called; an over-sized response fails as a `502` with the
+audit detail `upstream response exceeded the size limit`.
+
+Raising the request bound is not free. The body is read into memory before it is parsed,
+so the memory a caller can pin is that bound multiplied by concurrent requests. If you
+serve image or document payloads and raise it, check that against the pod's memory limit
+rather than only against the largest request you expect.
+
+The broker is also not the only limit in the chain. The gateway has one, its ASGI server
+has one, any ingress in front has one, and the provider has one. Raising the broker's
+bound is necessary but not sufficient: a payload the broker now accepts can still come
+back as an upstream `413`, which is recorded as `upstream_failed` with the upstream's own
+status and looks like a broker fault when it is not. If a large request fails after you
+have raised this bound, check the next hop before suspecting the broker.
+
 ## Rate limiting
 
 The bundled limiter is a process-local fixed window keyed by

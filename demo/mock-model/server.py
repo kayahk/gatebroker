@@ -17,7 +17,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 PORT = 8081
-_MAX_BODY_BYTES = 1_048_576
+# Matches the broker's default request bound, so the demo can actually carry the
+# payload sizes the broker accepts. A provider limit below the broker's turns a
+# working request into an upstream 413, which reads like a broker fault.
+_MAX_BODY_BYTES = 10_485_760
 
 
 def _completion(model: str, prompt: str) -> dict[str, Any]:

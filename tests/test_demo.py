@@ -9,6 +9,7 @@ container start with a message that points somewhere else entirely.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import yaml
@@ -169,3 +170,18 @@ def test_the_development_profile_requests_a_scope_the_realm_grants() -> None:
     for scope in document["scope"].split():
         assert scope in assigned, scope
     assert document["scope"] == _broker_environment()["GABRO_OIDC_REQUIRED_SCOPE"]
+
+
+def test_the_mock_provider_accepts_what_the_broker_forwards() -> None:
+    """A provider limit below the broker's turns a valid request into an upstream 413.
+
+    That reads like a broker fault, and it is how raising the broker's default was found
+    to be insufficient on its own: the demo's own provider still capped at a megabyte.
+    """
+    from gatebroker.forwarding import DEFAULT_MAX_REQUEST_BYTES
+
+    source = (DEMO / "mock-model" / "server.py").read_text(encoding="utf-8")
+    declared = re.search(r"^_MAX_BODY_BYTES = ([0-9_]+)$", source, re.M)
+
+    assert declared, "the mock provider must declare its body limit"
+    assert int(declared.group(1).replace("_", "")) >= DEFAULT_MAX_REQUEST_BYTES

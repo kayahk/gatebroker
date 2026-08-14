@@ -22,7 +22,15 @@ import jwt
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from .forwarding import KeyResolver, RateLimiter, RateLimitKey, create_app
+from .forwarding import (
+    DEFAULT_MAX_REQUEST_BYTES,
+    DEFAULT_MAX_RESPONSE_BYTES,
+    KeyResolver,
+    RateLimiter,
+    RateLimitKey,
+    _validated_byte_bound,
+    create_app,
+)
 from .oidc import TokenValidationConfig, TokenVerifier
 from .policy import load_policies
 
@@ -48,6 +56,8 @@ class RuntimeSettings:
     allow_cluster_local_plaintext_upstream: bool = False
     key_directory: str = ""
     tls_ca_bundle: str = ""
+    max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
 
 
 def load_runtime_settings(environment: Mapping[str, str] | None = None) -> RuntimeSettings:
@@ -98,6 +108,14 @@ def load_runtime_settings(environment: Mapping[str, str] | None = None) -> Runti
             "GABRO_UPSTREAM_ALLOW_CLUSTER_LOCAL_PLAINTEXT",
         ),
         key_directory=values.get("GABRO_KEY_DIR", "").strip(),
+        max_request_bytes=_byte_bound(
+            values.get("GABRO_MAX_REQUEST_BYTES", str(DEFAULT_MAX_REQUEST_BYTES)),
+            "GABRO_MAX_REQUEST_BYTES",
+        ),
+        max_response_bytes=_byte_bound(
+            values.get("GABRO_MAX_RESPONSE_BYTES", str(DEFAULT_MAX_RESPONSE_BYTES)),
+            "GABRO_MAX_RESPONSE_BYTES",
+        ),
         tls_ca_bundle=_readable_ca_bundle(values.get("GABRO_TLS_CA_BUNDLE", "").strip()),
     )
 
@@ -343,6 +361,8 @@ def create_runtime_app(
         upstream_base_url=settings.upstream_base_url,
         trusted_upstream_hosts=settings.trusted_upstream_hosts,
         allow_cluster_local_plaintext_upstream=settings.allow_cluster_local_plaintext_upstream,
+        max_request_bytes=settings.max_request_bytes,
+        max_response_bytes=settings.max_response_bytes,
         key_resolver=resolve_key,
         rate_limiter=rate_limiter
         or FixedWindowRateLimiter(
@@ -405,6 +425,21 @@ def _required(values: Mapping[str, str], name: str) -> str:
 
 def _csv(value: str) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _byte_bound(value: str, name: str) -> int:
+    """Parse a size bound and refuse anything outside the supported range.
+
+    The bounds are a memory defence: a request body is read into memory before it is
+    parsed, so what a hostile caller can pin is this value times the number of
+    concurrent requests. Rejecting an out-of-range setting at startup keeps a mistyped
+    number from becoming an outage on the first large request instead.
+    """
+    parsed = _positive_integer(value, name)
+    try:
+        return _validated_byte_bound(parsed, name)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
 
 
 def _claim_name(value: str, name: str) -> str:
