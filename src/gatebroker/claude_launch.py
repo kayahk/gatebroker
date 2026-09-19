@@ -29,6 +29,22 @@ from gatebroker.model_discovery import select
 
 MODEL_VARIABLE = "ANTHROPIC_MODEL"
 SMALL_FAST_MODEL_VARIABLE = "ANTHROPIC_SMALL_FAST_MODEL"
+# Claude Code resolves these aliases independently in Plan Mode and subagents.
+# Pin each to an entitled gateway model rather than allowing a vendor default.
+OPUS_MODEL_VARIABLE = "ANTHROPIC_DEFAULT_OPUS_MODEL"
+SONNET_MODEL_VARIABLE = "ANTHROPIC_DEFAULT_SONNET_MODEL"
+HAIKU_MODEL_VARIABLE = "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+FABLE_MODEL_VARIABLE = "ANTHROPIC_DEFAULT_FABLE_MODEL"
+SUBAGENT_MODEL_VARIABLE = "CLAUDE_CODE_SUBAGENT_MODEL"
+_MODEL_VARIABLES = (
+    MODEL_VARIABLE,
+    SMALL_FAST_MODEL_VARIABLE,
+    OPUS_MODEL_VARIABLE,
+    SONNET_MODEL_VARIABLE,
+    HAIKU_MODEL_VARIABLE,
+    FABLE_MODEL_VARIABLE,
+    SUBAGENT_MODEL_VARIABLE,
+)
 
 
 def is_claude_command(command: Sequence[str]) -> bool:
@@ -49,7 +65,19 @@ def claude_model_environment(*, model: str, small_fast_model: str) -> dict[str, 
     return {
         MODEL_VARIABLE: model,
         SMALL_FAST_MODEL_VARIABLE: small_fast_model,
+        OPUS_MODEL_VARIABLE: model,
+        SONNET_MODEL_VARIABLE: model,
+        HAIKU_MODEL_VARIABLE: small_fast_model,
+        FABLE_MODEL_VARIABLE: model,
+        SUBAGENT_MODEL_VARIABLE: model,
     }
+
+
+def _approved_or_default(pin: str | None, available_models: tuple[str, ...], default: str) -> str:
+    """Use an explicit pin only when entitlement discovery approves it."""
+    if pin and (not available_models or pin in available_models):
+        return pin
+    return default
 
 
 def augment_claude_environment(
@@ -71,16 +99,23 @@ def augment_claude_environment(
     if not is_claude_command(command):
         return merged
     preference = profile.model_preference()
-    merged.update(
-        claude_model_environment(
-            model=merged.get(MODEL_VARIABLE)
-            or select(preference, available_models, profile.primary_model()),
-            small_fast_model=merged.get(SMALL_FAST_MODEL_VARIABLE)
-            or select(
-                (profile.small_fast_model(), *reversed(preference)),
-                available_models,
-                profile.small_fast_model(),
-            ),
-        )
+    primary = select(preference, available_models, profile.primary_model())
+    small_fast = select(
+        (profile.small_fast_model(), *reversed(preference)),
+        available_models,
+        profile.small_fast_model(),
     )
+    defaults = claude_model_environment(model=primary, small_fast_model=small_fast)
+    for variable, default in defaults.items():
+        merged[variable] = _approved_or_default(
+            merged.get(variable), available_models, default
+        )
+    # Keep Claude's cheap-worker aliases synchronized when one is explicitly pinned.
+    selected_small_fast = _approved_or_default(
+        environment.get(SMALL_FAST_MODEL_VARIABLE) or environment.get(HAIKU_MODEL_VARIABLE),
+        available_models,
+        small_fast,
+    )
+    merged[SMALL_FAST_MODEL_VARIABLE] = selected_small_fast
+    merged[HAIKU_MODEL_VARIABLE] = selected_small_fast
     return merged

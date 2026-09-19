@@ -53,6 +53,43 @@ def test_discovered_models_take_precedence_over_the_profile() -> None:
     assert merged["ANTHROPIC_SMALL_FAST_MODEL"] == "policy-only"
 
 
+def test_claude_launch_pins_all_claude_aliases_to_entitled_models() -> None:
+    merged = claude_launch.augment_claude_environment(
+        ["claude"], {}, available_models=("allowed-primary", "allowed-fast")
+    )
+
+    assert merged[claude_launch.OPUS_MODEL_VARIABLE] == "allowed-primary"
+    assert merged[claude_launch.SONNET_MODEL_VARIABLE] == "allowed-primary"
+    assert merged[claude_launch.FABLE_MODEL_VARIABLE] == "allowed-primary"
+    assert merged[claude_launch.SUBAGENT_MODEL_VARIABLE] == "allowed-primary"
+    assert merged[claude_launch.HAIKU_MODEL_VARIABLE] == merged[
+        claude_launch.SMALL_FAST_MODEL_VARIABLE
+    ]
+
+
+@pytest.mark.parametrize(
+    "variable",
+    (
+        claude_launch.MODEL_VARIABLE,
+        claude_launch.SMALL_FAST_MODEL_VARIABLE,
+        claude_launch.OPUS_MODEL_VARIABLE,
+        claude_launch.SONNET_MODEL_VARIABLE,
+        claude_launch.HAIKU_MODEL_VARIABLE,
+        claude_launch.FABLE_MODEL_VARIABLE,
+        claude_launch.SUBAGENT_MODEL_VARIABLE,
+    ),
+)
+def test_claude_launch_rejects_unentitled_alias_pin(variable: str) -> None:
+    merged = claude_launch.augment_claude_environment(
+        ["claude"],
+        {variable: "not-entitled"},
+        available_models=("allowed-primary", "allowed-fast"),
+    )
+
+    assert merged[variable] != "not-entitled"
+    assert merged[variable] in {"allowed-primary", "allowed-fast"}
+
+
 def test_other_commands_are_left_alone() -> None:
     merged = claude_launch.augment_claude_environment(["codex"], {"KEEP": "value"})
 
