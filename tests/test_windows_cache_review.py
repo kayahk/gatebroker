@@ -94,6 +94,28 @@ def test_logout_covers_standalone_cleanup_and_malformed_manifest_fails_closed(mo
         cli.logout.callback()
 
 
+@pytest.mark.parametrize("replacement", ["small", "x" * 2000])
+def test_manifest_embedded_cleanup_is_migrated_before_replacement(monkeypatch, replacement):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    active = ("a" * 32, 1)
+    legacy_cleanup = ("b" * 32, 1)
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = cli._windows_cache_manifest_document(
+        active[0], active[1], [legacy_cleanup]
+    )
+    stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(active[0], 0))] = "active-secret"
+    stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(legacy_cleanup[0], 0))] = "old-secret"
+
+    cli._store_cache(replacement)
+
+    journal = cli._pending_windows_cache_cleanup()
+    assert active in journal
+    assert legacy_cleanup in journal or (
+        cli.CACHE_SERVICE,
+        cli._cache_chunk_account(legacy_cleanup[0], 0),
+    ) not in stored
+
+
 def test_failed_chunk_write_is_pretracked_before_any_chunk_write(monkeypatch):
     stored = memory_keyring(monkeypatch)
     win(monkeypatch)

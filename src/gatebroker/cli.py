@@ -436,6 +436,12 @@ def _store_cache_unlocked(serialized: str) -> None:
         raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
     previous_manifest = _windows_cache_manifest(previous)
     active = None if previous_manifest is None else (previous_manifest[0], previous_manifest[1])
+    embedded_cleanup = [] if previous_manifest is None else previous_manifest[2]
+
+    # Migrate cleanup carried by older manifest formats before replacing the primary
+    # pointer. A failed journal write leaves the old manifest and all its ownership intact.
+    if embedded_cleanup:
+        _record_windows_cache_cleanup(embedded_cleanup)
 
     # Only generations other than the primary's active generation may be reaped.
     # The journal is conservative: entries remain valid even when some chunks have
