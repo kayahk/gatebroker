@@ -50,6 +50,59 @@ def test_malformed_standalone_cleanup_fails_closed(monkeypatch, value):
         cli._store_cache("small")
 
 
+@pytest.mark.parametrize("source", ["embedded", "standalone"])
+def test_conflicting_active_cleanup_count_fails_closed_before_primary_write(monkeypatch, source):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    active = ("a" * 32, 2)
+    conflicting = (active[0], 1)
+    manifest_cleanup: list[tuple[str, int]] = [conflicting] if source == "embedded" else []
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = cli._windows_cache_manifest_document(
+        active[0], active[1], manifest_cleanup
+    )
+    for index in range(active[1]):
+        stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(active[0], index))] = f"active-{index}"
+    if source == "standalone":
+        stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)] = json.dumps(
+            {"cleanup": [{"generation": conflicting[0], "count": conflicting[1]}]}
+        )
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._store_cache("small")
+
+    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == cli._windows_cache_manifest_document(
+        active[0], active[1], manifest_cleanup
+    )
+    assert [stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(active[0], index))] for index in range(active[1])] == [
+        "active-0",
+        "active-1",
+    ]
+
+
+@pytest.mark.parametrize("source", ["embedded", "standalone"])
+def test_duplicate_cleanup_generation_with_conflicting_counts_fails_closed(monkeypatch, source):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    duplicate = "b" * 32
+    cleanup = [(duplicate, 1), (duplicate, 2)]
+    if source == "embedded":
+        stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = cli._windows_cache_manifest_document("a" * 32, 1, cleanup)
+    else:
+        stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)] = json.dumps(
+            {"cleanup": [{"generation": generation, "count": count} for generation, count in cleanup]}
+        )
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._store_cache("small")
+
+
+def test_merging_conflicting_cleanup_generation_counts_fails_closed():
+    generation = "a" * 32
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._merge_windows_cache_entries([(generation, 1)], [(generation, 2)])
+
+
 def test_load_sanitization_does_not_reenter_windows_lock(monkeypatch):
     memory_keyring(monkeypatch)
     held = False

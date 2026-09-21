@@ -257,7 +257,10 @@ def _windows_cache_manifest(serialized: str | None) -> tuple[str, int, list[tupl
         )
     ):
         return None
-    return generation, count, [(item["generation"], item["count"]) for item in cleanup]
+    entries = [(item["generation"], item["count"]) for item in cleanup]
+    if not _windows_cache_entries_have_consistent_counts([(generation, count), *entries]):
+        return None
+    return generation, count, entries
 
 
 def _windows_cache_manifest_document(generation: str, count: int, cleanup: list[tuple[str, int]]) -> str:
@@ -265,6 +268,15 @@ def _windows_cache_manifest_document(generation: str, count: int, cleanup: list[
     if cleanup:
         manifest["cleanup"] = [{"generation": old, "count": old_count} for old, old_count in cleanup]
     return json.dumps({_WINDOWS_CACHE_MANIFEST_KEY: manifest}, separators=(",", ":"))
+
+
+def _windows_cache_entries_have_consistent_counts(entries: list[tuple[str, int]]) -> bool:
+    counts: dict[str, int] = {}
+    for generation, count in entries:
+        existing = counts.setdefault(generation, count)
+        if existing != count:
+            return False
+    return True
 
 
 def _windows_cache_entries(value: object) -> list[tuple[str, int]] | None:
@@ -283,6 +295,8 @@ def _windows_cache_entries(value: object) -> list[tuple[str, int]] | None:
         entry = (item["generation"], item["count"])
         if entry not in entries:
             entries.append(entry)
+    if not _windows_cache_entries_have_consistent_counts(entries):
+        return None
     return entries if len(entries) <= _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES else None
 
 
@@ -305,6 +319,8 @@ def _merge_windows_cache_entries(*groups: list[tuple[str, int]]) -> list[tuple[s
         for entry in group:
             if entry not in merged:
                 merged.append(entry)
+    if not _windows_cache_entries_have_consistent_counts(merged):
+        raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
     if len(merged) > _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES:
         raise click.ClickException("The operating-system credential store cannot save the sign-in state.")
     return merged
@@ -322,7 +338,9 @@ def _record_windows_cache_cleanup(entries: list[tuple[str, int]]) -> None:
 
 def _retry_windows_cache_cleanup(active: tuple[str, int] | None) -> None:
     entries = _pending_windows_cache_cleanup()
-    stale = [entry for entry in entries if entry != active]
+    if active and any(generation == active[0] and count != active[1] for generation, count in entries):
+        raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
+    stale = [entry for entry in entries if active is None or entry[0] != active[0]]
     failed = _delete_windows_cache_manifest_entries(stale)
     remaining = _merge_windows_cache_entries([active] if active else [], failed)
     if remaining:
