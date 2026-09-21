@@ -1,14 +1,16 @@
 # The `gabro` CLI
 
-`gabro` signs a user in with their organization's identity provider and hands a
-short-lived gateway token to one child process. It never gives the user, or the
+`gabro` signs a user in with their organization's identity provider and normally
+hands a short-lived gateway token to one child process. It never gives the user, or the
 agent, the upstream gateway key.
 
 Its whole job is that boundary. The child receives a short-lived access token through
 its environment. MSAL's cached AccessToken records and refresh state are persisted
 only in the OS credential store; IdToken records are stripped. Tokens are never
 written to shell profiles, agent configuration files, logs, or child-owned
-persistence.
+persistence. `gabro token --format json` deliberately writes a short-lived bearer token
+to stdout for a trusted credential helper; treat its stdout as sensitive and never log,
+redirect, or persist it.
 
 ## Install
 
@@ -84,6 +86,10 @@ gabro run claude -- --model your-allowed-model
 
 # One-off launch without saving a profile.
 gabro exec -- your-compatible-client
+
+# Emit compact JSON containing a short-lived bearer token for a trusted credential
+# helper. stdout is sensitive: never redirect, log, or persist it.
+gabro token --format json
 
 # Remove local renewal state. Reports whether state existed.
 gabro logout
