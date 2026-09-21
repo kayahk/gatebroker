@@ -432,6 +432,35 @@ def test_token_json_emits_a_compact_silent_result_without_device_login(monkeypat
     device_login.assert_not_called()
 
 
+@pytest.mark.parametrize("expires_in", [True, 0, -1, 1.5, "300", None])
+def test_token_json_rejects_invalid_expiry_without_leaking_token(monkeypatch, expires_in) -> None:
+    secret = "secret-access-token"
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        lambda: {"access_token": secret, "expires_in": expires_in},
+        raising=False,
+    )
+
+    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+
+    assert result.exit_code != 0
+    assert secret not in result.output
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+def test_token_json_does_not_swallow_process_interruptions(monkeypatch, interruption) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        Mock(side_effect=interruption()),
+        raising=False,
+    )
+
+    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+
+    assert isinstance(result.exception, interruption)
+
 def test_token_json_failure_never_leaks_a_token_or_starts_device_login(monkeypatch) -> None:
     secret = "secret-access-token"
     device_login = Mock()
