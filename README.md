@@ -156,16 +156,18 @@ The other half of the project is a credential helper for developer machines. It
 signs a user in and hands a short-lived token to exactly one child process:
 
 ```shell
-gabro login                  # device-code sign-in; only renewal state is stored
+gabro login                  # device-code sign-in; cache stays in OS credential store
 gabro configure claude -- claude
 gabro run claude             # starts Claude Code against the gateway
 gabro logout
 ```
 
-The token lives in the spawned process and nowhere else — not in a shell profile,
-not in the agent's config file, not in shell history. Claude Code, OpenCode,
-Codex, and the GitHub Copilot CLI are handled, including the ones that ignore
-`OPENAI_BASE_URL` and need their own provider variables.
+The child receives a short-lived access token through its environment. MSAL's cached
+AccessToken records and refresh state are persisted only in the OS credential store;
+IdToken records are stripped. No token is written to a shell profile, agent config,
+log, or child-owned persistence. Claude Code, OpenCode, Codex, and the GitHub Copilot
+CLI are handled, including the ones that ignore `OPENAI_BASE_URL` and need their own
+provider variables.
 
 `gabro` compiles in its tenant, client, scope, and gateway URL on purpose: if
 those were environment-configurable, a shell profile could redirect a freshly

@@ -291,6 +291,30 @@ def test_malformed_root_manifest_key_after_complex_string_value_is_detected(key_
     assert cli._contains_windows_manifest_key(document)
 
 
+@pytest.mark.parametrize(
+    "scalar",
+    ["true", "false", "null", "12", "-12", "1.25", "1e+2"],
+    ids=["true", "false", "null", "integer", "negative", "decimal", "exponent"],
+)
+def test_truncated_manifest_key_after_root_scalar_fails_closed_and_preserves_credentials(monkeypatch, scalar):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    document = '{"ordinary":' + scalar + ',"windows-cache-chun'
+    chunk_account = cli._cache_chunk_account("a" * 32, 0)
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = document
+    stored[(cli.CACHE_SERVICE, chunk_account)] = "sensitive chunk"
+    original = stored.copy()
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._load_windows_chunked_cache(document)
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._store_cache("replacement")
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli.logout.callback()
+
+    assert stored == original
+
+
 def test_valid_ordinary_msal_cache_is_not_manifest_like(monkeypatch):
     stored = memory_keyring(monkeypatch)
     win(monkeypatch)

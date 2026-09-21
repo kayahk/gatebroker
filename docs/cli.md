@@ -4,9 +4,11 @@
 short-lived gateway token to one child process. It never gives the user, or the
 agent, the upstream gateway key.
 
-Its whole job is that boundary. Everything below is in service of one property:
-the credential exists in the spawned process and nowhere else — not in a shell
-profile, not in an agent's configuration file, not in your shell history.
+Its whole job is that boundary. The child receives a short-lived access token through
+its environment. MSAL's cached AccessToken records and refresh state are persisted
+only in the OS credential store; IdToken records are stripped. Tokens are never
+written to shell profiles, agent configuration files, logs, or child-owned
+persistence.
 
 ## Install
 
@@ -64,8 +66,8 @@ gabro --help
 
 ```sh
 # Device-code sign-in. Copies the code and opens the verification page when it
-# can, and keeps both visible when it cannot. Only renewal state is persisted,
-# in the OS credential store.
+# can. MSAL AccessToken records and refresh state are persisted only in the OS
+# credential store; IdToken records are stripped.
 gabro login
 
 # Sign in, save a launcher profile, and start the agent in one step. Equivalent

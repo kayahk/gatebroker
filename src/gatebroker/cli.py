@@ -325,8 +325,20 @@ def _contains_windows_manifest_key(serialized: str | None) -> bool:
             elif root_state == "value":
                 if character in "{[":
                     depth = 2
+                    position += 1
                 else:
+                    scalar_end = position
+                    while scalar_end < len(serialized) and serialized[scalar_end] not in " \t\r\n,}":
+                        scalar_end += 1
+                    try:
+                        scalar = _strict_json_loads(serialized[position:scalar_end])
+                    except (TypeError, ValueError):
+                        return False
+                    if isinstance(scalar, (dict, list, str)):
+                        return False
                     root_state = "after-value"
+                    position = scalar_end
+                continue
             elif root_state == "after-value":
                 if character == ",":
                     root_state = "key"
@@ -678,9 +690,9 @@ def _save_cache(cache: msal.SerializableTokenCache) -> None:
     if not cache.has_state_changed:
         return
     serialized, _removed_tokens = _sanitize_cache(cache.serialize())
-    # MSAL serializes access and ID tokens alongside refresh state. Retain only
-    # the entries necessary for a later silent refresh in the OS credential
-    # store; short-lived broker access tokens must stay process-ephemeral.
+    # MSAL serializes access and ID tokens alongside refresh state. Retain its
+    # short-lived AccessToken records and refresh state only in the OS credential
+    # store; IdToken records are stripped by _sanitize_cache.
     _store_cache(serialized)
 
 
@@ -941,7 +953,7 @@ def _configure_local_agent(agent: str, command: Sequence[str], *, reset: bool) -
 @main.command()
 @click.argument("agent", required=False)
 def login(agent: str | None) -> None:
-    """Sign in by device code and save sanitized refresh state in the OS credential store.
+    """Sign in and save sanitized MSAL state only in the OS credential store.
 
     When AGENT is provided, also save a launcher profile equivalent to
     `gabro configure AGENT -- AGENT` and immediately start it with an
