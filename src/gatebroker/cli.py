@@ -228,56 +228,66 @@ def _strict_json_loads(serialized: str) -> object:
 
 
 def _matches_partial_windows_manifest_key(serialized: str, start: int) -> tuple[bool, int]:
-    """Match one JSON string against the reserved key, including truncation."""
+    """Lex one JSON string and match a complete or truncated reserved key."""
     target_index = 0
+    matches = True
     position = start + 1
     while position < len(serialized):
         character = serialized[position]
         if character == '"':
-            return target_index == len(_WINDOWS_CACHE_MANIFEST_KEY), position + 1
-        if target_index == len(_WINDOWS_CACHE_MANIFEST_KEY):
-            return False, position
-        if character != "\\":
-            if character != _WINDOWS_CACHE_MANIFEST_KEY[target_index]:
-                return False, position
-            target_index += 1
+            return matches and target_index == len(_WINDOWS_CACHE_MANIFEST_KEY), position + 1
+        if character == "\\":
+            position += 1
+            if position == len(serialized):
+                return matches and target_index < len(_WINDOWS_CACHE_MANIFEST_KEY), position
+            if serialized[position] == "u":
+                digits = serialized[position + 1 : position + 5]
+                if len(digits) < 4:
+                    expected = (
+                        f"{ord(_WINDOWS_CACHE_MANIFEST_KEY[target_index]):04x}"
+                        if matches and target_index < len(_WINDOWS_CACHE_MANIFEST_KEY)
+                        else ""
+                    )
+                    return matches and digits.lower() == expected[: len(digits)], len(serialized)
+                if any(digit not in "0123456789abcdefABCDEF" for digit in digits) or (
+                    not matches
+                    or target_index == len(_WINDOWS_CACHE_MANIFEST_KEY)
+                    or digits.lower() != f"{ord(_WINDOWS_CACHE_MANIFEST_KEY[target_index]):04x}"
+                ):
+                    matches = False
+                else:
+                    target_index += 1
+                position += 5
+                continue
+            matches = False
             position += 1
             continue
-
-        escape_start = position
+        if (
+            not matches
+            or target_index == len(_WINDOWS_CACHE_MANIFEST_KEY)
+            or character != _WINDOWS_CACHE_MANIFEST_KEY[target_index]
+        ):
+            matches = False
+        else:
+            target_index += 1
         position += 1
-        if position == len(serialized):
-            return True, position
-        if serialized[position] != "u":
-            return False, position + 1
-        position += 1
-        expected = f"{ord(_WINDOWS_CACHE_MANIFEST_KEY[target_index]):04x}"
-        digits = serialized[position : position + 4]
-        if any(character not in "0123456789abcdefABCDEF" for character in digits):
-            return False, position + len(digits)
-        if len(digits) < 4:
-            return digits.lower() == expected[: len(digits)], len(serialized)
-        if digits.lower() != expected:
-            return False, position + 4
-        target_index += 1
-        position = escape_start + 6
-
-    return target_index > 0, position
+    return matches and target_index > 0, position
 
 
 def _contains_windows_manifest_key(serialized: str | None) -> bool:
     """Recognize an exact or truncated top-level manifest key.
 
-    Valid ordinary cache JSON is classified structurally.  For damaged JSON, scan
-    root-level strings conservatively so a truncated literal or ``\\u`` escape
-    cannot hide ownership of credential chunks.
+    Valid ordinary cache JSON is classified structurally. For damaged JSON, a
+    small lexer follows root-object grammar: only a string where a root key is
+    expected can claim the reserved key. Complete strings are skipped with JSON
+    escape handling, so braces and brackets in prior values cannot change depth.
     """
     if not isinstance(serialized, str):
         return False
     try:
         decoded = _strict_json_loads(serialized)
     except (TypeError, ValueError):
-        decoded = None
+        pass
     else:
         return isinstance(decoded, dict) and _WINDOWS_CACHE_MANIFEST_KEY in decoded
 
@@ -288,21 +298,50 @@ def _contains_windows_manifest_key(serialized: str | None) -> bool:
         return False
 
     depth = 1
+    root_state = "key"
     position += 1
     while position < len(serialized):
         character = serialized[position]
+        if character.isspace():
+            position += 1
+            continue
         if character == '"':
             matches, end = _matches_partial_windows_manifest_key(serialized, position)
-            if depth == 1 and matches:
+            if depth == 1 and root_state == "key" and matches:
                 return True
             position = end
+            if depth == 1 and root_state == "key":
+                root_state = "colon"
+            elif depth == 1 and root_state == "value":
+                root_state = "after-value"
             continue
-        if character in "[{":
+        if depth == 1:
+            if root_state == "key":
+                return False
+            if root_state == "colon":
+                if character != ":":
+                    return False
+                root_state = "value"
+            elif root_state == "value":
+                if character in "{[":
+                    depth = 2
+                else:
+                    root_state = "after-value"
+            elif root_state == "after-value":
+                if character == ",":
+                    root_state = "key"
+                elif character == "}":
+                    return False
+                else:
+                    return False
+            position += 1
+            continue
+        if character in "{[":
             depth += 1
         elif character in "]}":
             depth -= 1
-            if depth == 0:
-                return False
+            if depth == 1:
+                root_state = "after-value"
         position += 1
     return False
 
@@ -366,7 +405,7 @@ def _windows_cache_manifest(serialized: str | None) -> tuple[str, int, list[tupl
     ):
         return None
     entries = [(item["generation"], item["count"]) for item in cleanup]
-    if not _windows_cache_entries_have_consistent_counts([(generation, count), *entries]):
+    if len(entries) != len(set(entries)) or not _windows_cache_entries_have_consistent_counts([(generation, count), *entries]):
         return None
     return generation, count, entries
 
@@ -401,8 +440,9 @@ def _windows_cache_entries(value: object) -> list[tuple[str, int]] | None:
         ):
             return None
         entry = (item["generation"], item["count"])
-        if entry not in entries:
-            entries.append(entry)
+        if entry in entries:
+            return None
+        entries.append(entry)
     if not _windows_cache_entries_have_consistent_counts(entries):
         return None
     return entries if len(entries) <= _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES else None
@@ -424,6 +464,8 @@ def _pending_windows_cache_cleanup() -> list[tuple[str, int]]:
 def _merge_windows_cache_entries(*groups: list[tuple[str, int]]) -> list[tuple[str, int]]:
     merged: list[tuple[str, int]] = []
     for group in groups:
+        if len(group) != len(set(group)):
+            raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
         for entry in group:
             if entry not in merged:
                 merged.append(entry)
@@ -475,6 +517,11 @@ def _delete_windows_cache_manifest_entries(entries: list[tuple[str, int]]) -> li
     return [(generation, count) for generation, count in entries if not _delete_windows_cache_generation(generation, count)]
 
 
+def _windows_cache_lock_path() -> Path:
+    """Use the per-user home directory, not mutable app-data routing."""
+    return Path.home() / ".gabro" / "cache.lock"
+
+
 @contextmanager
 def _windows_cache_lock():
     if sys.platform != "win32":
@@ -482,7 +529,7 @@ def _windows_cache_lock():
         return
     import msvcrt
 
-    lock_path = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "gabro" / "cache.lock"
+    lock_path = _windows_cache_lock_path()
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock_file:
         if lock_file.seek(0, os.SEEK_END) == 0:

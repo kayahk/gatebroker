@@ -17,6 +17,40 @@ def memory_keyring(monkeypatch):
     return stored
 
 
+def test_windows_lock_path_is_invariant_under_localappdata_changes(monkeypatch):
+    monkeypatch.setattr(cli.Path, "home", classmethod(lambda cls: cli.Path("C:/Users/alice")))
+    monkeypatch.setenv("LOCALAPPDATA", "C:/attacker/one")
+    first = cli._windows_cache_lock_path()
+    monkeypatch.setenv("LOCALAPPDATA", "D:/attacker/two")
+
+    assert cli._windows_cache_lock_path() == first == cli.Path("C:/Users/alice/.gabro/cache.lock")
+
+
+@pytest.mark.parametrize("source", ["embedded", "standalone"])
+def test_duplicate_identical_cleanup_entries_fail_closed(monkeypatch, source):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    duplicate = ("b" * 32, 1)
+    if source == "embedded":
+        stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = cli._windows_cache_manifest_document(
+            "a" * 32, 1, [duplicate, duplicate]
+        )
+    else:
+        stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)] = json.dumps(
+            {"cleanup": [{"generation": duplicate[0], "count": duplicate[1]}] * 2}
+        )
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._store_cache("small")
+
+
+def test_merging_duplicate_identical_cleanup_entries_fails_closed():
+    entry = ("a" * 32, 1)
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._merge_windows_cache_entries([entry, entry])
+
+
 @contextmanager
 def no_lock():
     yield
@@ -244,6 +278,17 @@ def test_truncated_reserved_manifest_key_fails_closed_and_preserves_chunks(monke
             cli.logout.callback()
 
         assert stored == original
+
+
+@pytest.mark.parametrize(
+    "key_spelling",
+    [cli._WINDOWS_CACHE_MANIFEST_KEY, "windows-cache-ch\\u0075nks"],
+    ids=["literal", "unicode-escaped-u"],
+)
+def test_malformed_root_manifest_key_after_complex_string_value_is_detected(key_spelling):
+    document = json.dumps({"note": '{ [ " \\ } ]'})[:-1] + ',"' + key_spelling + '":{"generation":"'
+
+    assert cli._contains_windows_manifest_key(document)
 
 
 def test_valid_ordinary_msal_cache_is_not_manifest_like(monkeypatch):
