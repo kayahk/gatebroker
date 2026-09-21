@@ -218,6 +218,45 @@ def test_manifest_looking_malformed_primary_and_chunks_are_preserved(monkeypatch
     assert stored == original
 
 
+@pytest.mark.parametrize(
+    "key_spelling",
+    [
+        cli._WINDOWS_CACHE_MANIFEST_KEY,
+        "windows-cache-ch\\u0075nks",
+    ],
+    ids=["literal", "unicode-escaped-u"],
+)
+def test_truncated_reserved_manifest_key_fails_closed_and_preserves_chunks(monkeypatch, key_spelling):
+    for boundary in range(1, len(key_spelling) + 1):
+        stored = memory_keyring(monkeypatch)
+        win(monkeypatch)
+        document = '{"' + key_spelling[:boundary]
+        chunk_account = cli._cache_chunk_account("a" * 32, 0)
+        stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = document
+        stored[(cli.CACHE_SERVICE, chunk_account)] = "sensitive chunk"
+        original = stored.copy()
+
+        with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+            cli._load_windows_chunked_cache(document)
+        with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+            cli._store_cache("replacement")
+        with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+            cli.logout.callback()
+
+        assert stored == original
+
+
+def test_valid_ordinary_msal_cache_is_not_manifest_like(monkeypatch):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    document = json.dumps({"RefreshToken": {"windows-cache-chunks": "ordinary cache value"}})
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = document
+
+    assert cli._load_windows_chunked_cache(document) == document
+    cli._store_cache("replacement")
+    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == "replacement"
+
+
 @pytest.mark.parametrize("chunked", [False, True], ids=["direct", "chunked"])
 @pytest.mark.parametrize(
     "payload",

@@ -227,29 +227,84 @@ def _strict_json_loads(serialized: str) -> object:
     )
 
 
-def _contains_windows_manifest_key(serialized: str | None) -> bool:
-    """Recognize a literal or escaped manifest key even in damaged JSON.
+def _matches_partial_windows_manifest_key(serialized: str, start: int) -> tuple[bool, int]:
+    """Match one JSON string against the reserved key, including truncation."""
+    target_index = 0
+    position = start + 1
+    while position < len(serialized):
+        character = serialized[position]
+        if character == '"':
+            return target_index == len(_WINDOWS_CACHE_MANIFEST_KEY), position + 1
+        if target_index == len(_WINDOWS_CACHE_MANIFEST_KEY):
+            return False, position
+        if character != "\\":
+            if character != _WINDOWS_CACHE_MANIFEST_KEY[target_index]:
+                return False, position
+            target_index += 1
+            position += 1
+            continue
 
-    A primary that contains this reserved key may own credential chunks.  Treat a
-    malformed document as a manifest candidate rather than replacing or deleting
-    it, because doing otherwise can orphan sensitive chunk data.
+        escape_start = position
+        position += 1
+        if position == len(serialized):
+            return True, position
+        if serialized[position] != "u":
+            return False, position + 1
+        position += 1
+        expected = f"{ord(_WINDOWS_CACHE_MANIFEST_KEY[target_index]):04x}"
+        digits = serialized[position : position + 4]
+        if any(character not in "0123456789abcdefABCDEF" for character in digits):
+            return False, position + len(digits)
+        if len(digits) < 4:
+            return digits.lower() == expected[: len(digits)], len(serialized)
+        if digits.lower() != expected:
+            return False, position + 4
+        target_index += 1
+        position = escape_start + 6
+
+    return target_index > 0, position
+
+
+def _contains_windows_manifest_key(serialized: str | None) -> bool:
+    """Recognize an exact or truncated top-level manifest key.
+
+    Valid ordinary cache JSON is classified structurally.  For damaged JSON, scan
+    root-level strings conservatively so a truncated literal or ``\\u`` escape
+    cannot hide ownership of credential chunks.
     """
     if not isinstance(serialized, str):
         return False
-    decoder = json.JSONDecoder()
+    try:
+        decoded = _strict_json_loads(serialized)
+    except (TypeError, ValueError):
+        decoded = None
+    else:
+        return isinstance(decoded, dict) and _WINDOWS_CACHE_MANIFEST_KEY in decoded
+
     position = 0
-    while True:
-        position = serialized.find('"', position)
-        if position < 0:
-            return False
-        try:
-            value, end = decoder.raw_decode(serialized, position)
-        except json.JSONDecodeError:
-            position += 1
+    while position < len(serialized) and serialized[position].isspace():
+        position += 1
+    if position == len(serialized) or serialized[position] != "{":
+        return False
+
+    depth = 1
+    position += 1
+    while position < len(serialized):
+        character = serialized[position]
+        if character == '"':
+            matches, end = _matches_partial_windows_manifest_key(serialized, position)
+            if depth == 1 and matches:
+                return True
+            position = end
             continue
-        if value == _WINDOWS_CACHE_MANIFEST_KEY:
-            return True
-        position = end
+        if character in "[{":
+            depth += 1
+        elif character in "]}":
+            depth -= 1
+            if depth == 0:
+                return False
+        position += 1
+    return False
 
 
 def _cache_chunk_account(generation: str, index: int) -> str:
