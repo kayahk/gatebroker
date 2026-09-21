@@ -71,7 +71,13 @@ def test_login_uses_device_flow_and_never_prints_access_token(monkeypatch) -> No
     assert "Authentication completed." in result.output
     assert profile.BASE_URL in result.output
     assert token not in result.output
-    assert stored == {cli.CACHE_ACCOUNT: '{"RefreshToken":{"refresh":"refresh-state"}}'}
+    assert stored == {
+        cli.CACHE_ACCOUNT: (
+            '{"AccessToken":{"access":"access-token-must-not-appear-in-output"},'
+            '"RefreshToken":{"refresh":"refresh-state"}}'
+        )
+    }
+    assert "id-token-must-not-be-stored" not in stored[cli.CACHE_ACCOUNT]
     application.acquire_token_by_device_flow.assert_called_once()
 
 
@@ -408,6 +414,42 @@ def test_failed_silent_refresh_persists_changed_cache_before_requiring_login(mon
     assert saved == {cli.CACHE_ACCOUNT: '{"RefreshToken":{"refresh":"cleaned-refresh-state"}}'}
 
 
+def test_token_json_emits_a_compact_silent_result_without_device_login(monkeypatch) -> None:
+    token = "silent-access-token"
+    device_login = Mock()
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        lambda: {"access_token": token, "expires_in": 300},
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "_device_code_login", device_login)
+
+    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert result.output == '{"access_token":"silent-access-token","expires_in":300}\n'
+    device_login.assert_not_called()
+
+
+def test_token_json_failure_never_leaks_a_token_or_starts_device_login(monkeypatch) -> None:
+    secret = "secret-access-token"
+    device_login = Mock()
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        Mock(side_effect=click.ClickException(f"renewal failed: {secret}")),
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "_device_code_login", device_login)
+
+    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+
+    assert result.exit_code != 0
+    assert secret not in result.output
+    device_login.assert_not_called()
+
+
 def test_logout_surfaces_a_failed_delete_for_an_existing_cache(monkeypatch) -> None:
     monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: "serialized-cache")
     monkeypatch.setattr(cli.keyring, "delete_password", Mock(side_effect=cli.PasswordDeleteError("denied")))
@@ -419,7 +461,7 @@ def test_logout_surfaces_a_failed_delete_for_an_existing_cache(monkeypatch) -> N
     assert "denied" not in result.output
 
 
-def test_load_cache_rewrites_legacy_access_and_id_tokens_before_use(monkeypatch) -> None:
+def test_load_cache_rewrites_legacy_id_tokens_but_retains_access_tokens(monkeypatch) -> None:
     legacy_cache = json.dumps(
         {
             "AccessToken": {"old-access": "legacy-access-token"},
@@ -433,8 +475,12 @@ def test_load_cache_rewrites_legacy_access_and_id_tokens_before_use(monkeypatch)
 
     cli._load_cache()
 
-    assert stored == {cli.CACHE_ACCOUNT: '{"RefreshToken":{"refresh":"refresh-state"}}'}
-    assert "legacy-access-token" not in stored[cli.CACHE_ACCOUNT]
+    assert stored == {
+        cli.CACHE_ACCOUNT: (
+            '{"AccessToken":{"old-access":"legacy-access-token"},'
+            '"RefreshToken":{"refresh":"refresh-state"}}'
+        )
+    }
     assert "legacy-id-token" not in stored[cli.CACHE_ACCOUNT]
 
 
@@ -446,7 +492,7 @@ def test_rejects_an_unapproved_credential_store_backend(monkeypatch) -> None:
         cli._require_secure_keyring()
 
 
-def test_load_cache_scrubs_legacy_tokens_even_when_deserialization_fails(monkeypatch) -> None:
+def test_load_cache_scrubs_id_tokens_even_when_deserialization_fails(monkeypatch) -> None:
     legacy_cache = json.dumps(
         {
             "AccessToken": {"old-access": "legacy-access-token"},
@@ -467,7 +513,13 @@ def test_load_cache_scrubs_legacy_tokens_even_when_deserialization_fails(monkeyp
     with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
         cli._load_cache()
 
-    assert stored == {cli.CACHE_ACCOUNT: '{"RefreshToken":{"refresh":"refresh-state"}}'}
+    assert stored == {
+        cli.CACHE_ACCOUNT: (
+            '{"AccessToken":{"old-access":"legacy-access-token"},'
+            '"RefreshToken":{"refresh":"refresh-state"}}'
+        )
+    }
+    assert "legacy-id-token" not in stored[cli.CACHE_ACCOUNT]
 
 
 def test_unconfigured_distribution_refuses_to_acquire_a_token(monkeypatch) -> None:

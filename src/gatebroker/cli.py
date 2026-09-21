@@ -191,9 +191,7 @@ def _require_secure_keyring() -> None:
 
 def _sanitize_cache(serialized: str) -> tuple[str, bool]:
     cache_data = json.loads(serialized)
-    removed = False
-    for token_type in ("AccessToken", "IdToken"):
-        removed = cache_data.pop(token_type, None) is not None or removed
+    removed = cache_data.pop("IdToken", None) is not None
     return json.dumps(cache_data, separators=(",", ":")), removed
 
 
@@ -372,7 +370,8 @@ def _retain_only_signed_in_account(
                 application.remove_account(account)
 
 
-def _acquire_access_token() -> str:
+def _acquire_access_token_result() -> Mapping[str, object]:
+    """Return a silently acquired MSAL result without starting an interactive flow."""
     _tenant_id, _client_id, scope, _base_url = _settings()
     cache = _load_cache()
     application = _application(cache)
@@ -390,9 +389,9 @@ def _acquire_access_token() -> str:
             scopes=[scope], account=accounts[0]
         )
         token = (result or {}).get("access_token")
-        if isinstance(token, str) and token:
+        if isinstance(token, str) and token and isinstance(result, Mapping):
             _save_cache(cache)
-            return token
+            return result
         reason = _renewal_failure_reason(result)
     else:
         reason = ""
@@ -400,6 +399,16 @@ def _acquire_access_token() -> str:
     raise click.ClickException(
         f"No valid GateBroker sign-in is available; run {_invocation()} login.{reason}"
     )
+
+
+def _acquire_access_token() -> str:
+    result = _acquire_access_token_result()
+    token = result.get("access_token")
+    # The result-returning helper verifies this before returning; keep this defensive
+    # boundary because callers use the string helper as a credential injection point.
+    if isinstance(token, str) and token:
+        return token
+    raise click.ClickException("No valid GateBroker sign-in is available; run login.")
 
 
 def _renewal_failure_reason(result: object) -> str:
@@ -498,6 +507,30 @@ def login(agent: str | None) -> None:
     if agent is not None:
         _configure_local_agent(agent, [agent], reset=False)
         _run_with_broker_environment([agent])
+
+
+@main.command()
+@click.option("--format", "output_format", type=click.Choice(("json",)), required=True)
+def token(output_format: str) -> None:
+    """Print a silently acquired broker token for a non-interactive caller."""
+    del output_format  # The explicit choice leaves room for future formats without defaults.
+    try:
+        result = _acquire_access_token_result()
+        access_token = result.get("access_token")
+        expires_in = result.get("expires_in")
+        if (
+            not isinstance(access_token, str)
+            or not access_token
+            or not isinstance(expires_in, int)
+            or isinstance(expires_in, bool)
+            or expires_in <= 0
+        ):
+            raise ValueError("silent result lacks a usable expiration")
+    except Exception as error:
+        # A token command is machine-facing: emit no partial JSON or provider details,
+        # which can include credential material, and never fall back to device login.
+        raise click.ClickException("No valid GateBroker sign-in is available; run login.") from error
+    click.echo(json.dumps({"access_token": access_token, "expires_in": expires_in}, separators=(",", ":")))
 
 
 @main.command()
