@@ -457,9 +457,9 @@ def test_token_json_does_not_swallow_process_interruptions(monkeypatch, interrup
         raising=False,
     )
 
-    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
-
-    assert isinstance(result.exception, interruption)
+    assert cli.token.callback is not None
+    with pytest.raises(interruption):
+        cli.token.callback("json")
 
 def test_token_json_failure_never_leaks_a_token_or_starts_device_login(monkeypatch) -> None:
     secret = "secret-access-token"
