@@ -93,6 +93,34 @@ def test_selection_accepts_a_model_this_build_has_never_heard_of() -> None:
     assert select(profile.model_preference(), ("brand-new",), "x") == "brand-new"
 
 
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        ("auto-router", True),
+        ("provider/smart-router", True),
+        ("provider/claude-auto", True),
+        ("provider/leaf-model", False),
+        ("automatic-leaf", False),
+    ],
+)
+def test_router_detection_is_generic_without_classifying_leaf_models(
+    model_id: str, expected: bool
+) -> None:
+    assert model_discovery.looks_like_router(model_id) is expected
+
+
+def test_claude_selection_prefers_an_entitled_router() -> None:
+    available = ("preferred-leaf", "provider/auto-router", "other-leaf")
+
+    assert model_discovery.select_claude_model(available, "fallback") == "provider/auto-router"
+
+
+def test_claude_selection_never_invents_or_uses_a_withheld_router() -> None:
+    available = ("other-leaf",)
+
+    assert model_discovery.select_claude_model(available, "fallback") == "other-leaf"
+
+
 def test_launching_claude_uses_the_discovered_models(monkeypatch) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(cli, "_acquire_access_token", lambda: "ephemeral-token")

@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath, PureWindowsPath
 
 from gatebroker import profile
-from gatebroker.model_discovery import select
+from gatebroker.model_discovery import select_claude_model
 
 MODEL_VARIABLE = "ANTHROPIC_MODEL"
 SMALL_FAST_MODEL_VARIABLE = "ANTHROPIC_SMALL_FAST_MODEL"
@@ -98,13 +98,8 @@ def augment_claude_environment(
     merged = dict(environment)
     if not is_claude_command(command):
         return merged
-    preference = profile.model_preference()
-    primary = select(preference, available_models, profile.primary_model())
-    small_fast = select(
-        (profile.small_fast_model(), *reversed(preference)),
-        available_models,
-        profile.small_fast_model(),
-    )
+    primary = select_claude_model(available_models, profile.primary_model())
+    small_fast = primary if available_models else profile.small_fast_model()
     defaults = claude_model_environment(model=primary, small_fast_model=small_fast)
     for variable, default in defaults.items():
         merged[variable] = _approved_or_default(

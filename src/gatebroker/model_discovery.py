@@ -19,6 +19,9 @@ import json
 import urllib.error
 import urllib.request
 
+from gatebroker import profile
+
+_ROUTER_MARKERS = ("auto-router", "auto_router", "autorouter", "smart-router")
 _TIMEOUT_SECONDS = 10
 
 
@@ -58,3 +61,29 @@ def select(preferences: tuple[str, ...], available: tuple[str, ...], fallback: s
             return preferred
     # The policy may allow something this build has never heard of, which is the point.
     return available[0]
+
+
+def looks_like_router(model_id: str) -> bool:
+    """Return whether an entitled id denotes a generic auto-router."""
+    lowered = model_id.casefold()
+    basename = lowered.rsplit("/", 1)[-1]
+    return (
+        any(marker in lowered for marker in _ROUTER_MARKERS)
+        or basename.endswith("-auto")
+        or basename == "auto"
+    )
+
+
+def select_router(available: tuple[str, ...]) -> str | None:
+    """Return the first entitled auto-router, if the policy lists one."""
+    return next((model for model in available if looks_like_router(model)), None)
+
+
+def select_claude_model(available: tuple[str, ...], fallback: str) -> str:
+    """Select one entitled model for every Claude Code family slot.
+
+    A router is preferred because Claude's family aliases are not entitlement model IDs.
+    The fallback is used only when discovery failed; otherwise selection stays within the
+    models the broker reported for this caller.
+    """
+    return select_router(available) or select(profile.model_preference(), available, fallback)
