@@ -169,6 +169,77 @@ def test_manifest_embedded_cleanup_is_migrated_before_replacement(monkeypatch, r
     ) not in stored
 
 
+@pytest.mark.parametrize(
+    "document",
+    [
+        json.dumps({cli._WINDOWS_CACHE_MANIFEST_KEY: {"generation": "a" * 32, "count": 1}, "unexpected": True}),
+        json.dumps({cli._WINDOWS_CACHE_MANIFEST_KEY: {"generation": "a" * 32, "count": 1, "unexpected": True}}),
+        json.dumps({cli._WINDOWS_CACHE_MANIFEST_KEY: {"generation": "a" * 32, "count": 1, "cleanup": [{"generation": "b" * 32, "count": 1, "unexpected": True}]}}),
+        '{"windows-cache-chunks":{"generation":"' + "a" * 32 + '","generation":"' + "b" * 32 + '","count":1}}',
+        '{"windows-cache-ch\\u0075nks":{"generation":"' + "a" * 32 + '","count":1},"windows-cache-chunks":{"generation":"' + "b" * 32 + '","count":1}}',
+    ],
+)
+def test_non_exact_or_duplicate_primary_manifest_fails_closed_everywhere(monkeypatch, document):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = document
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._load_windows_chunked_cache(document)
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._store_cache("small")
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli.logout.callback()
+    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == document
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        json.dumps({"cleanup": [], "unexpected": True}),
+        json.dumps({"cleanup": [{"generation": "a" * 32, "count": 1, "unexpected": True}]}),
+        '{"cleanup":[],"clean\\u0075p":[]}',
+    ],
+)
+def test_non_exact_or_duplicate_standalone_cleanup_fails_closed(monkeypatch, document):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)] = document
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._store_cache("small")
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli.logout.callback()
+    assert stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)] == document
+
+
+def test_generation_collision_retries_before_chunk_writes_and_preserves_active_cache(monkeypatch):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    active = "a" * 32
+    replacement = "b" * 32
+    payload = "x" * 2000
+    old_manifest = cli._windows_cache_manifest_document(active, 2, [])
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = old_manifest
+    for index in range(2):
+        stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(active, index))] = f"old-{index}"
+    generations = iter([active, replacement])
+    monkeypatch.setattr(cli.secrets, "token_hex", lambda _: next(generations))
+    real_set = cli.keyring.set_password
+
+    def fail_second_replacement_chunk(service, account, value):
+        if account == cli._cache_chunk_account(replacement, 1):
+            raise OSError("write")
+        real_set(service, account, value)
+
+    monkeypatch.setattr(cli.keyring, "set_password", fail_second_replacement_chunk)
+    with pytest.raises(click.ClickException, match="credential store is unavailable"):
+        cli._store_cache(payload)
+
+    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == old_manifest
+    assert [stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(active, index))] for index in range(2)] == ["old-0", "old-1"]
+
+
 def test_failed_chunk_write_is_pretracked_before_any_chunk_write(monkeypatch):
     stored = memory_keyring(monkeypatch)
     win(monkeypatch)

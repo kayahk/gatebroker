@@ -201,6 +201,20 @@ _WINDOWS_CACHE_MANIFEST_KEY = "windows-cache-chunks"
 _WINDOWS_CACHE_CLEANUP_ACCOUNT = f"{CACHE_ACCOUNT}-chunk-cleanup"
 _WINDOWS_CACHE_MAX_CHUNKS = 1_024
 _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES = 16
+_WINDOWS_CACHE_GENERATION_RETRIES = 8
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = item
+    return value
+
+
+def _strict_json_loads(serialized: str) -> object:
+    return json.loads(serialized, object_pairs_hook=_reject_duplicate_json_keys)
 
 
 def _cache_chunk_account(generation: str, index: int) -> str:
@@ -236,13 +250,16 @@ def _windows_cache_manifest(serialized: str | None) -> tuple[str, int, list[tupl
     if not serialized:
         return None
     try:
-        value = json.loads(serialized).get(_WINDOWS_CACHE_MANIFEST_KEY)
-    except (AttributeError, TypeError, ValueError):
+        decoded = _strict_json_loads(serialized)
+        if not isinstance(decoded, dict) or set(decoded) != {_WINDOWS_CACHE_MANIFEST_KEY}:
+            return None
+        value = decoded[_WINDOWS_CACHE_MANIFEST_KEY]
+    except (TypeError, ValueError):
         return None
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or set(value) not in ({"generation", "count"}, {"generation", "count", "cleanup"}):
         return None
-    generation = value.get("generation")
-    count = value.get("count")
+    generation = value["generation"]
+    count = value["count"]
     cleanup = value.get("cleanup", [])
     if not _valid_windows_cache_generation(generation) or not _valid_windows_cache_count(count):
         return None
@@ -251,8 +268,9 @@ def _windows_cache_manifest(serialized: str | None) -> tuple[str, int, list[tupl
         or len(cleanup) > _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES
         or any(
             not isinstance(item, dict)
-            or not _valid_windows_cache_generation(item.get("generation"))
-            or not _valid_windows_cache_count(item.get("count"))
+            or set(item) != {"generation", "count"}
+            or not _valid_windows_cache_generation(item["generation"])
+            or not _valid_windows_cache_count(item["count"])
             for item in cleanup
         )
     ):
@@ -305,7 +323,7 @@ def _pending_windows_cache_cleanup() -> list[tuple[str, int]]:
     if serialized is None:
         return []
     try:
-        entries = _windows_cache_entries(json.loads(serialized))
+        entries = _windows_cache_entries(_strict_json_loads(serialized))
     except (TypeError, ValueError):
         entries = None
     if entries is None:
@@ -437,10 +455,22 @@ def _invalid_windows_manifest(serialized: str | None) -> bool:
     if not serialized:
         return False
     try:
-        decoded = json.loads(serialized)
+        decoded = _strict_json_loads(serialized)
     except (TypeError, ValueError):
-        return False
+        try:
+            decoded = json.loads(serialized)
+        except (TypeError, ValueError):
+            return False
     return isinstance(decoded, dict) and _WINDOWS_CACHE_MANIFEST_KEY in decoded and _windows_cache_manifest(serialized) is None
+
+
+def _new_windows_cache_generation(forbidden_entries: list[tuple[str, int]]) -> str:
+    forbidden = {generation for generation, _count in forbidden_entries}
+    for _ in range(_WINDOWS_CACHE_GENERATION_RETRIES):
+        generation = secrets.token_hex(16)
+        if generation not in forbidden:
+            return generation
+    raise click.ClickException("The operating-system credential store cannot save the sign-in state.")
 
 
 def _store_cache_unlocked(serialized: str) -> None:
@@ -465,6 +495,7 @@ def _store_cache_unlocked(serialized: str) -> None:
     # The journal is conservative: entries remain valid even when some chunks have
     # already disappeared, so interruption at any point is retryable.
     _retry_windows_cache_cleanup(active)
+    pending = _pending_windows_cache_cleanup()
 
     if len(serialized.encode("utf-16-le")) <= _WINDOWS_CREDENTIAL_MAX_BYTES:
         if active:
@@ -475,7 +506,7 @@ def _store_cache_unlocked(serialized: str) -> None:
     chunks = _split_windows_cache(serialized)
     if len(chunks) > _WINDOWS_CACHE_MAX_CHUNKS:
         raise click.ClickException("The operating-system credential store cannot save the sign-in state.")
-    generation = secrets.token_hex(16)
+    generation = _new_windows_cache_generation(([active] if active else []) + pending)
     new_entry = (generation, len(chunks))
 
     # Durable intent precedes credential data. The active old generation is also
