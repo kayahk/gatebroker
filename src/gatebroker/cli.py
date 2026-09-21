@@ -190,7 +190,9 @@ def _require_secure_keyring() -> None:
 
 
 def _sanitize_cache(serialized: str) -> tuple[str, bool]:
-    cache_data = json.loads(serialized)
+    cache_data = _strict_json_loads(serialized)
+    if not isinstance(cache_data, dict):
+        raise ValueError("cache must be a JSON object")
     removed = cache_data.pop("IdToken", None) is not None
     return json.dumps(cache_data, separators=(",", ":")), removed
 
@@ -213,8 +215,41 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
     return value
 
 
+def _reject_nonstandard_json_constant(value: str) -> object:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 def _strict_json_loads(serialized: str) -> object:
-    return json.loads(serialized, object_pairs_hook=_reject_duplicate_json_keys)
+    return json.loads(
+        serialized,
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=_reject_nonstandard_json_constant,
+    )
+
+
+def _contains_windows_manifest_key(serialized: str | None) -> bool:
+    """Recognize a literal or escaped manifest key even in damaged JSON.
+
+    A primary that contains this reserved key may own credential chunks.  Treat a
+    malformed document as a manifest candidate rather than replacing or deleting
+    it, because doing otherwise can orphan sensitive chunk data.
+    """
+    if not isinstance(serialized, str):
+        return False
+    decoder = json.JSONDecoder()
+    position = 0
+    while True:
+        position = serialized.find('"', position)
+        if position < 0:
+            return False
+        try:
+            value, end = decoder.raw_decode(serialized, position)
+        except json.JSONDecodeError:
+            position += 1
+            continue
+        if value == _WINDOWS_CACHE_MANIFEST_KEY:
+            return True
+        position = end
 
 
 def _cache_chunk_account(generation: str, index: int) -> str:
@@ -415,11 +450,7 @@ def _load_windows_chunked_cache(serialized: str) -> str:
 def _load_windows_chunked_cache_unlocked(serialized: str) -> str:
     manifest = _windows_cache_manifest(serialized)
     if manifest is None:
-        try:
-            decoded = json.loads(serialized)
-        except (TypeError, ValueError):
-            decoded = None
-        if isinstance(decoded, dict) and _WINDOWS_CACHE_MANIFEST_KEY in decoded:
+        if _invalid_windows_manifest(serialized):
             raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
         return serialized
     generation, count, _cleanup = manifest
@@ -452,16 +483,7 @@ def _store_cache(serialized: str) -> None:
 
 
 def _invalid_windows_manifest(serialized: str | None) -> bool:
-    if not serialized:
-        return False
-    try:
-        decoded = _strict_json_loads(serialized)
-    except (TypeError, ValueError):
-        try:
-            decoded = json.loads(serialized)
-        except (TypeError, ValueError):
-            return False
-    return isinstance(decoded, dict) and _WINDOWS_CACHE_MANIFEST_KEY in decoded and _windows_cache_manifest(serialized) is None
+    return bool(serialized) and _contains_windows_manifest_key(serialized) and _windows_cache_manifest(serialized) is None
 
 
 def _new_windows_cache_generation(forbidden_entries: list[tuple[str, int]]) -> str:

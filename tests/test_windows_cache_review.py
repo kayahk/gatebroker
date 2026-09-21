@@ -196,6 +196,59 @@ def test_non_exact_or_duplicate_primary_manifest_fails_closed_everywhere(monkeyp
 @pytest.mark.parametrize(
     "document",
     [
+        '{"windows-cache-chunks":{"generation":"' + "a" * 32 + '","count":1',
+        '{"windows-cache-ch\\u0075nks":{"generation":"' + "a" * 32 + '","count":1}} trailing',
+    ],
+)
+def test_manifest_looking_malformed_primary_and_chunks_are_preserved(monkeypatch, document):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    chunk_account = cli._cache_chunk_account("a" * 32, 0)
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = document
+    stored[(cli.CACHE_SERVICE, chunk_account)] = "sensitive chunk"
+    original = stored.copy()
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._load_windows_chunked_cache(document)
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._store_cache("replacement")
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli.logout.callback()
+
+    assert stored == original
+
+
+@pytest.mark.parametrize("chunked", [False, True], ids=["direct", "chunked"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"RefreshToken":{},"RefreshToken":{}}',
+        '{"RefreshToken":{"value":NaN}}',
+        '{"RefreshToken":{"value":Infinity}}',
+        '{"RefreshToken":{"value":-Infinity}}',
+    ],
+    ids=["duplicate-key", "nan", "infinity", "negative-infinity"],
+)
+def test_ambiguous_or_nonstandard_cache_payload_is_rejected(monkeypatch, chunked, payload):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    if chunked:
+        generation = "a" * 32
+        stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = cli._windows_cache_manifest_document(generation, 1, [])
+        stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(generation, 0))] = payload
+    else:
+        stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = payload
+    original = stored.copy()
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._load_cache()
+
+    assert stored == original
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
         json.dumps({"cleanup": [], "unexpected": True}),
         json.dumps({"cleanup": [{"generation": "a" * 32, "count": 1, "unexpected": True}]}),
         '{"cleanup":[],"clean\\u0075p":[]}',
