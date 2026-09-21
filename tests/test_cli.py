@@ -412,7 +412,9 @@ def test_windows_small_write_keeps_old_manifest_when_cleanup_fails(monkeypatch) 
     with pytest.raises(click.ClickException, match="credential store is unavailable"):
         cli._store_cache('{"RefreshToken":{"refresh":"state"}}')
 
-    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == old_manifest
+    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == '{"RefreshToken":{"refresh":"state"}}'
+    pending = json.loads(stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)])
+    assert pending["cleanup"] == [{"generation": old["generation"], "count": old["count"]}]
 
 
 def test_windows_cache_splits_utf16_and_reassembles(monkeypatch) -> None:
@@ -432,11 +434,102 @@ def test_windows_cache_splits_utf16_and_reassembles(monkeypatch) -> None:
 @pytest.mark.parametrize("count", [True, 0, 1_025])
 def test_windows_invalid_manifest_counts_fail_closed(monkeypatch, count) -> None:
     monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
     monkeypatch.setattr(cli, "_invocation", lambda: "gabro")
     document = json.dumps({cli._WINDOWS_CACHE_MANIFEST_KEY: {"generation": "a" * 32, "count": count}})
 
     with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
         cli._load_windows_chunked_cache(document)
+
+
+def test_windows_escaped_manifest_key_fails_closed(monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    monkeypatch.setattr(cli, "_invocation", lambda: "gabro")
+    document = '{"windows-cache-ch\\u0075nks":{"generation":"bad","count":1}}'
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._load_windows_chunked_cache(document)
+
+
+def test_windows_large_to_small_primary_write_failure_preserves_old_chunks(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    cli._store_cache("x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    old_primary = stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)]
+    old_accounts = set(stored)
+    real_set = cli.keyring.set_password
+
+    def fail_small_primary(service, account, value):
+        if account == cli.CACHE_ACCOUNT and value == "small":
+            raise OSError("primary write failed")
+        real_set(service, account, value)
+
+    monkeypatch.setattr(cli.keyring, "set_password", fail_small_primary)
+    with pytest.raises(click.ClickException, match="credential store is unavailable"):
+        cli._store_cache("small")
+
+    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == old_primary
+    assert set(stored) == old_accounts
+
+
+def test_windows_partial_write_rollback_cleanup_failure_is_recorded_for_retry(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    cli._store_cache("x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    new_generation = "b" * 32
+    new_account = cli._cache_chunk_account(new_generation, 0)
+    real_set = cli.keyring.set_password
+    real_delete = cli.keyring.delete_password
+
+    monkeypatch.setattr(cli.secrets, "token_hex", lambda _count: new_generation)
+
+    def fail_second_chunk(service, account, value):
+        if account == cli._cache_chunk_account(new_generation, 1):
+            raise OSError("chunk write failed")
+        real_set(service, account, value)
+
+    def fail_rollback_cleanup(service, account):
+        if account == new_account:
+            raise OSError("cleanup failed")
+        real_delete(service, account)
+
+    monkeypatch.setattr(cli.keyring, "set_password", fail_second_chunk)
+    monkeypatch.setattr(cli.keyring, "delete_password", fail_rollback_cleanup)
+    with pytest.raises(click.ClickException, match="credential store is unavailable"):
+        cli._store_cache("y" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+
+    pending = json.loads(stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)])
+    assert pending["cleanup"] == [{"generation": new_generation, "count": 1}]
+    assert (cli.CACHE_SERVICE, new_account) in stored
+
+
+def test_windows_load_reads_primary_and_chunks_under_one_lock(monkeypatch) -> None:
+    events: list[str] = []
+    lock_held = False
+
+    @contextmanager
+    def tracking_lock():
+        nonlocal lock_held
+        events.append("lock")
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+            events.append("unlock")
+
+    manifest = cli._windows_cache_manifest_document("a" * 32, 1, [])
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", tracking_lock)
+    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: events.append(f"get:{account}:{lock_held}") or (manifest if account == cli.CACHE_ACCOUNT else '{"RefreshToken":{}}'))
+
+    cli._load_cache()
+
+    assert f"get:{cli.CACHE_ACCOUNT}:True" in events
+    assert events == ["lock", f"get:{cli.CACHE_ACCOUNT}:True", f"get:{cli._cache_chunk_account('a' * 32, 0)}:True", "unlock"]
 
 
 def test_windows_partial_write_preserves_old_cache_and_cleans_new_chunks(monkeypatch) -> None:

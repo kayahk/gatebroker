@@ -198,6 +198,7 @@ def _sanitize_cache(serialized: str) -> tuple[str, bool]:
 _WINDOWS_CREDENTIAL_MAX_BYTES = 2_560
 _WINDOWS_CACHE_CHUNK_BYTES = 2_400
 _WINDOWS_CACHE_MANIFEST_KEY = "windows-cache-chunks"
+_WINDOWS_CACHE_CLEANUP_ACCOUNT = f"{CACHE_ACCOUNT}-chunk-cleanup"
 _WINDOWS_CACHE_MAX_CHUNKS = 1_024
 _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES = 16
 
@@ -266,12 +267,41 @@ def _windows_cache_manifest_document(generation: str, count: int, cleanup: list[
     return json.dumps({_WINDOWS_CACHE_MANIFEST_KEY: manifest}, separators=(",", ":"))
 
 
+def _pending_windows_cache_cleanup() -> list[tuple[str, int]]:
+    try:
+        value = json.loads(keyring.get_password(CACHE_SERVICE, _WINDOWS_CACHE_CLEANUP_ACCOUNT) or "{}")
+    except (KeyringError, OSError, TypeError, ValueError):
+        return []
+    cleanup = value.get("cleanup") if isinstance(value, dict) else None
+    if not isinstance(cleanup, list):
+        return []
+    return [(item["generation"], item["count"]) for item in cleanup if isinstance(item, dict) and _valid_windows_cache_generation(item.get("generation")) and _valid_windows_cache_count(item.get("count"))]
+
+
+def _record_windows_cache_cleanup(entries: list[tuple[str, int]]) -> None:
+    keyring.set_password(CACHE_SERVICE, _WINDOWS_CACHE_CLEANUP_ACCOUNT, json.dumps({"cleanup": [{"generation": generation, "count": count} for generation, count in entries]}, separators=(",", ":")))
+
+
+def _retry_windows_cache_cleanup() -> None:
+    entries = _pending_windows_cache_cleanup()
+    if not entries:
+        return
+    failed = _delete_windows_cache_manifest_entries(entries)
+    if failed:
+        _record_windows_cache_cleanup(failed)
+    else:
+        keyring.delete_password(CACHE_SERVICE, _WINDOWS_CACHE_CLEANUP_ACCOUNT)
+
+
 def _delete_windows_cache_generation(generation: str, count: int) -> bool:
     for index in range(count):
+        account = _cache_chunk_account(generation, index)
         try:
-            keyring.delete_password(CACHE_SERVICE, _cache_chunk_account(generation, index))
+            if keyring.get_password(CACHE_SERVICE, account) is None:
+                continue
+            keyring.delete_password(CACHE_SERVICE, account)
         except PasswordDeleteError:
-            continue
+            return False
         except (KeyringError, OSError):
             return False
     return True
@@ -304,9 +334,18 @@ def _windows_cache_lock():
 
 
 def _load_windows_chunked_cache(serialized: str) -> str:
+    with _windows_cache_lock():
+        return _load_windows_chunked_cache_unlocked(serialized)
+
+
+def _load_windows_chunked_cache_unlocked(serialized: str) -> str:
     manifest = _windows_cache_manifest(serialized)
     if manifest is None:
-        if _WINDOWS_CACHE_MANIFEST_KEY in serialized:
+        try:
+            decoded = json.loads(serialized)
+        except (TypeError, ValueError):
+            decoded = None
+        if isinstance(decoded, dict) and _WINDOWS_CACHE_MANIFEST_KEY in decoded:
             raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
         return serialized
     generation, count, _cleanup = manifest
@@ -343,14 +382,18 @@ def _store_cache_unlocked(serialized: str) -> None:
     if sys.platform != "win32":
         keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, serialized)
         return
+    _retry_windows_cache_cleanup()
     previous = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
     previous_manifest = _windows_cache_manifest(previous)
     previous_entries = [] if previous_manifest is None else [(previous_manifest[0], previous_manifest[1]), *previous_manifest[2]]
     if len(serialized.encode("utf-16-le")) <= _WINDOWS_CREDENTIAL_MAX_BYTES:
+        keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, serialized)
+        if not previous_entries:
+            return
         failed_cleanup = _delete_windows_cache_manifest_entries(previous_entries)
         if failed_cleanup:
+            _record_windows_cache_cleanup(failed_cleanup)
             raise click.ClickException("The operating-system credential store is unavailable.")
-        keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, serialized)
         return
     if previous_manifest is not None:
         active_entry = (previous_manifest[0], previous_manifest[1])
@@ -370,7 +413,9 @@ def _store_cache_unlocked(serialized: str) -> None:
             written_count = index + 1
         keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, _windows_cache_manifest_document(generation, len(chunks), previous_entries))
     except (KeyringError, OSError):
-        _delete_windows_cache_generation(generation, written_count)
+        failed_cleanup = _delete_windows_cache_manifest_entries([(generation, written_count)])
+        if failed_cleanup:
+            _record_windows_cache_cleanup(failed_cleanup)
         raise
     failed_cleanup = _delete_windows_cache_manifest_entries(previous_entries)
     if failed_cleanup:
@@ -383,23 +428,26 @@ def _load_cache() -> msal.SerializableTokenCache:
     cache = msal.SerializableTokenCache()
     _require_secure_keyring()
     try:
-        serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
-    except (KeyringError, OSError) as error:
-        raise click.ClickException("The operating-system credential store is unavailable.") from error
-    if serialized:
-        try:
-            if sys.platform == "win32":
-                serialized = _load_windows_chunked_cache(serialized)
+        if sys.platform == "win32":
+            with _windows_cache_lock():
+                serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+                if serialized:
+                    serialized = _load_windows_chunked_cache_unlocked(serialized)
+        else:
+            serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+        if serialized:
             sanitized, removed_tokens = _sanitize_cache(serialized)
             if removed_tokens:
                 _store_cache(sanitized)
             cache.deserialize(sanitized)
-        except click.ClickException:
-            raise
-        except Exception as error:  # Cache contents must never be shown to the user.
-            raise click.ClickException(
-                f"The stored sign-in state is invalid; run {_invocation()} logout, then login."
-            ) from error
+    except (KeyringError, OSError) as error:
+        raise click.ClickException("The operating-system credential store is unavailable.") from error
+    except click.ClickException:
+        raise
+    except Exception as error:  # Cache contents must never be shown to the user.
+        raise click.ClickException(
+            f"The stored sign-in state is invalid; run {_invocation()} logout, then login."
+        ) from error
     return cache
 
 
@@ -718,15 +766,19 @@ def logout() -> None:
     """Remove the local sanitized MSAL cache from the OS credential store."""
     try:
         _require_secure_keyring()
-        serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
-        if serialized is None:
-            click.echo("No local GateBroker sign-in state was found.")
-            return
         if sys.platform == "win32":
             with _windows_cache_lock():
+                serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+                if serialized is None:
+                    click.echo("No local GateBroker sign-in state was found.")
+                    return
                 _delete_windows_cache_chunks(serialized)
                 keyring.delete_password(CACHE_SERVICE, CACHE_ACCOUNT)
         else:
+            serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+            if serialized is None:
+                click.echo("No local GateBroker sign-in state was found.")
+                return
             keyring.delete_password(CACHE_SERVICE, CACHE_ACCOUNT)
         click.echo("Signed out. Local GateBroker sign-in state has been removed.")
     except click.ClickException:
