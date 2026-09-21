@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+
+import click
+import pytest
+
+from gatebroker import cli
+
+
+def memory_keyring(monkeypatch):
+    stored = {}
+    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: stored.get((service, account)))
+    monkeypatch.setattr(cli.keyring, "set_password", lambda service, account, value: stored.__setitem__((service, account), value))
+    monkeypatch.setattr(cli.keyring, "delete_password", lambda service, account: stored.pop((service, account), None))
+    return stored
+
+
+@contextmanager
+def no_lock():
+    yield
+
+
+def win(monkeypatch):
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", no_lock)
+    monkeypatch.setattr(cli, "_require_secure_keyring", lambda: None)
+    monkeypatch.setattr(cli, "_invocation", lambda: "gabro")
+
+
+def test_cleanup_record_merges_existing_entries(monkeypatch):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    first = ("a" * 32, 1)
+    second = ("b" * 32, 2)
+    stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)] = json.dumps({"cleanup": [{"generation": first[0], "count": first[1]}]})
+    cli._record_windows_cache_cleanup([second])
+    assert json.loads(stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)]) == {
+        "cleanup": [{"generation": first[0], "count": 1}, {"generation": second[0], "count": 2}]
+    }
+
+
+@pytest.mark.parametrize("value", ["not-json", json.dumps({"cleanup": [{"generation": "bad", "count": 1}]})])
+def test_malformed_standalone_cleanup_fails_closed(monkeypatch, value):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)] = value
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._store_cache("small")
+
+
+def test_load_sanitization_does_not_reenter_windows_lock(monkeypatch):
+    memory_keyring(monkeypatch)
+    held = False
+    events = []
+
+    @contextmanager
+    def tracking_lock():
+        nonlocal held
+        assert not held
+        held = True
+        events.append("lock")
+        try:
+            yield
+        finally:
+            held = False
+            events.append("unlock")
+
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_require_secure_keyring", lambda: None)
+    monkeypatch.setattr(cli, "_windows_cache_lock", tracking_lock)
+    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: '{"IdToken":{"x":1}}' if account == cli.CACHE_ACCOUNT else None)
+    monkeypatch.setattr(cli.keyring, "set_password", lambda service, account, value: events.append(("set", held)))
+    cli._load_cache()
+    assert events == ["lock", ("set", True), "unlock"]
+
+
+def test_logout_covers_standalone_cleanup_and_malformed_manifest_fails_closed(monkeypatch):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    generation = "a" * 32
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = cli._windows_cache_manifest_document(generation, 1, [])
+    stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(generation, 0))] = "secret"
+    extra = "b" * 32
+    stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)] = json.dumps({"cleanup": [{"generation": extra, "count": 1}]})
+    stored[(cli.CACHE_SERVICE, cli._cache_chunk_account(extra, 0))] = "old-secret"
+    result = cli.logout.callback()
+    assert result is None
+    assert stored == {}
+
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = json.dumps({cli._WINDOWS_CACHE_MANIFEST_KEY: {"generation": "bad", "count": 1}})
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli.logout.callback()
+
+
+def test_failed_chunk_write_is_pretracked_before_any_chunk_write(monkeypatch):
+    stored = memory_keyring(monkeypatch)
+    win(monkeypatch)
+    calls = []
+    real_set = cli.keyring.set_password
+    generation = "c" * 32
+    monkeypatch.setattr(cli.secrets, "token_hex", lambda _: generation)
+
+    def fail_chunk(service, account, value):
+        calls.append(account)
+        if account == cli._cache_chunk_account(generation, 0):
+            raise OSError("write")
+        real_set(service, account, value)
+
+    monkeypatch.setattr(cli.keyring, "set_password", fail_chunk)
+    with pytest.raises(click.ClickException):
+        cli._store_cache("x" * 2000)
+    assert calls[0] == cli._WINDOWS_CACHE_CLEANUP_ACCOUNT
+    assert (cli.CACHE_SERVICE, cli.CACHE_ACCOUNT) not in stored
+    expected_count = len(cli._split_windows_cache("x" * 2000))
+    assert json.loads(stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)])["cleanup"] == [{"generation": generation, "count": expected_count}]

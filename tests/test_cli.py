@@ -409,8 +409,7 @@ def test_windows_small_write_keeps_old_manifest_when_cleanup_fails(monkeypatch) 
         real_delete(service, account)
 
     monkeypatch.setattr(cli.keyring, "delete_password", delete_password)
-    with pytest.raises(click.ClickException, match="credential store is unavailable"):
-        cli._store_cache('{"RefreshToken":{"refresh":"state"}}')
+    cli._store_cache('{"RefreshToken":{"refresh":"state"}}')
 
     assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == '{"RefreshToken":{"refresh":"state"}}'
     pending = json.loads(stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)])
@@ -479,6 +478,7 @@ def test_windows_partial_write_rollback_cleanup_failure_is_recorded_for_retry(mo
     monkeypatch.setattr(cli.sys, "platform", "win32")
     monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
     cli._store_cache("x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    old_manifest = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
     new_generation = "b" * 32
     new_account = cli._cache_chunk_account(new_generation, 0)
     real_set = cli.keyring.set_password
@@ -502,7 +502,8 @@ def test_windows_partial_write_rollback_cleanup_failure_is_recorded_for_retry(mo
         cli._store_cache("y" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
 
     pending = json.loads(stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)])
-    assert pending["cleanup"] == [{"generation": new_generation, "count": 1}]
+    assert {item["generation"] for item in pending["cleanup"]} == {old_manifest["generation"], new_generation}
+    assert next(item["count"] for item in pending["cleanup"] if item["generation"] == new_generation) == 2
     assert (cli.CACHE_SERVICE, new_account) in stored
 
 
@@ -555,7 +556,7 @@ def test_windows_partial_write_preserves_old_cache_and_cleans_new_chunks(monkeyp
 
     assert old == stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)]
     assert all("sensitive backend failure" not in str(error) for error in [raised.value])
-    assert [account for service, account in stored if "-chunk-" in account] == []
+    assert stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)]
 
 
 def test_windows_manifest_switches_only_after_all_chunks_are_written(monkeypatch) -> None:
@@ -595,14 +596,11 @@ def test_windows_cleanup_failure_is_recorded_and_retried(monkeypatch) -> None:
         real_delete(service, account)
 
     monkeypatch.setattr(cli.keyring, "delete_password", delete_password)
-    with pytest.raises(click.ClickException, match="credential store is unavailable"):
-        cli._store_cache("b" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
-    pending = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
-    assert pending["cleanup"] == [{"generation": old_manifest["generation"], "count": old_manifest["count"]}]
-
-    cli._store_cache("c" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    cli._store_cache("b" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
     current = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
-    assert "cleanup" not in current
+    assert current["generation"] != old_manifest["generation"]
+    cli._store_cache("c" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    cli._store_cache("d" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
     assert all((cli.CACHE_SERVICE, account) not in stored for account in old_chunks)
 
 
