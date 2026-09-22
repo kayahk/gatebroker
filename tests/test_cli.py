@@ -629,7 +629,11 @@ def test_windows_keyring_and_os_errors_are_sanitized(monkeypatch) -> None:
 
 def test_logout_removes_only_the_secure_token_cache(monkeypatch) -> None:
     deleted: list[tuple[str, str]] = []
-    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: "serialized-cache")
+    monkeypatch.setattr(
+        cli.keyring,
+        "get_password",
+        lambda service, account: "serialized-cache" if account == cli.CACHE_ACCOUNT else None,
+    )
     monkeypatch.setattr(cli.keyring, "delete_password", lambda service, account: deleted.append((service, account)))
 
     result = CliRunner().invoke(cli.main, ["logout"])
@@ -745,7 +749,11 @@ def test_token_json_failure_never_leaks_a_token_or_starts_device_login(monkeypat
 
 
 def test_logout_surfaces_a_failed_delete_for_an_existing_cache(monkeypatch) -> None:
-    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: "serialized-cache")
+    monkeypatch.setattr(
+        cli.keyring,
+        "get_password",
+        lambda service, account: "serialized-cache" if account == cli.CACHE_ACCOUNT else None,
+    )
     monkeypatch.setattr(cli.keyring, "delete_password", Mock(side_effect=cli.PasswordDeleteError("denied")))
 
     result = CliRunner().invoke(cli.main, ["logout"])
@@ -764,7 +772,11 @@ def test_load_cache_rewrites_legacy_id_tokens_but_retains_access_tokens(monkeypa
         }
     )
     stored: dict[str, str] = {}
-    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: legacy_cache)
+    monkeypatch.setattr(
+        cli.keyring,
+        "get_password",
+        lambda service, account: legacy_cache if account == cli.CACHE_ACCOUNT else None,
+    )
     monkeypatch.setattr(cli.keyring, "set_password", lambda service, account, value: stored.update({account: value}))
 
     cli._load_cache()
@@ -801,7 +813,11 @@ def test_load_cache_scrubs_id_tokens_even_when_deserialization_fails(monkeypatch
             raise ValueError("malformed")
 
     monkeypatch.setattr(cli.msal, "SerializableTokenCache", InvalidCache)
-    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: legacy_cache)
+    monkeypatch.setattr(
+        cli.keyring,
+        "get_password",
+        lambda service, account: legacy_cache if account == cli.CACHE_ACCOUNT else None,
+    )
     monkeypatch.setattr(cli.keyring, "set_password", lambda service, account, value: stored.update({account: value}))
 
     with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):

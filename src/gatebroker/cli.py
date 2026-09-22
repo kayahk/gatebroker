@@ -461,8 +461,6 @@ def _windows_cache_entries(value: object) -> list[tuple[str, int]] | None:
 
 
 def _pending_windows_cache_cleanup() -> list[tuple[str, int]]:
-    if sys.platform != "win32":
-        return []
     serialized = keyring.get_password(CACHE_SERVICE, _WINDOWS_CACHE_CLEANUP_ACCOUNT)
     if serialized is None:
         return []
