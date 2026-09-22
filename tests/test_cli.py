@@ -394,6 +394,19 @@ def test_windows_small_cache_stays_in_the_primary_keyring_entry(monkeypatch) -> 
     assert stored == {(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT): '{"RefreshToken":{"refresh":"state"}}'}
 
 
+def test_windows_payload_above_chunk_slack_is_split(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    payload = "x" * (cli._WINDOWS_CACHE_CHUNK_BYTES // 2 + 1)
+
+    cli._store_cache(payload)
+
+    manifest = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
+    assert manifest["count"] >= 2
+    assert cli._load_windows_chunked_cache(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)]) == payload
+
+
 def test_windows_small_write_keeps_old_manifest_when_cleanup_fails(monkeypatch) -> None:
     stored = _memory_keyring(monkeypatch)
     monkeypatch.setattr(cli.sys, "platform", "win32")
@@ -694,11 +707,25 @@ def test_token_json_emits_a_compact_silent_result_without_device_login(monkeypat
     )
     monkeypatch.setattr(cli, "_device_code_login", device_login)
 
-    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+    result = CliRunner().invoke(cli.main, ["token"])
 
     assert result.exit_code == 0
     assert result.output == '{"access_token":"silent-access-token","expires_in":300}\n'
     device_login.assert_not_called()
+
+
+def test_token_json_format_flag_matches_the_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        lambda: {"access_token": "silent-access-token", "expires_in": 300},
+        raising=False,
+    )
+
+    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert result.output == '{"access_token":"silent-access-token","expires_in":300}\n'
 
 
 @pytest.mark.parametrize("expires_in", [True, 0, -1, 1.5, "300", None])

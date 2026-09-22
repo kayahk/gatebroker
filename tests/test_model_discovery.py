@@ -101,6 +101,9 @@ def test_selection_accepts_a_model_this_build_has_never_heard_of() -> None:
         ("provider/claude-auto", True),
         ("provider/leaf-model", False),
         ("automatic-leaf", False),
+        ("not-an-auto-router", False),
+        ("legacy-auto-router-v1", False),
+        ("myautorouter", False),
     ],
 )
 def test_router_detection_is_generic_without_classifying_leaf_models(
@@ -151,6 +154,9 @@ def test_discovery_is_skipped_for_agents_that_do_not_need_a_model(monkeypatch) -
     monkeypatch.setattr(cli.subprocess, "run", lambda command, check, env: Mock(returncode=0))
 
     CliRunner().invoke(cli.main, ["exec", "--", "some-other-agent"])
+    assert asked is False
+
+    CliRunner().invoke(cli.main, ["exec", "--", "copilot"])
     assert asked is False
 
     CliRunner().invoke(cli.main, ["exec", "--", "claude"])

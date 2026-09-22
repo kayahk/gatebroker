@@ -9,6 +9,16 @@ from click.testing import CliRunner
 import gatebroker.cli as cli
 from gatebroker import claude_launch, profile
 
+_CLAUDE_MODEL_VARIABLES = (
+    claude_launch.MODEL_VARIABLE,
+    claude_launch.SMALL_FAST_MODEL_VARIABLE,
+    claude_launch.OPUS_MODEL_VARIABLE,
+    claude_launch.SONNET_MODEL_VARIABLE,
+    claude_launch.HAIKU_MODEL_VARIABLE,
+    claude_launch.FABLE_MODEL_VARIABLE,
+    claude_launch.SUBAGENT_MODEL_VARIABLE,
+)
+
 
 def test_is_claude_command_matches_basename_and_windows_exe() -> None:
     assert claude_launch.is_claude_command(["claude"])
@@ -22,16 +32,18 @@ def test_is_claude_command_matches_basename_and_windows_exe() -> None:
 def test_launching_claude_names_models_from_the_profile_when_nothing_is_discovered() -> None:
     merged = claude_launch.augment_claude_environment(["claude"], {})
 
-    assert merged["ANTHROPIC_MODEL"] == profile.primary_model()
-    assert merged["ANTHROPIC_SMALL_FAST_MODEL"] == profile.small_fast_model()
+    for variable in _CLAUDE_MODEL_VARIABLES:
+        assert merged[variable] == profile.primary_model()
 
 
-def test_both_models_are_set_because_background_work_uses_the_small_one() -> None:
-    """With only the session model set, background requests fail while it looks healthy."""
+def test_every_claude_slot_names_the_same_allowed_model() -> None:
+    """Family aliases are not a catalog. One allowed id prevents Plan Mode 403s."""
     merged = claude_launch.augment_claude_environment(["claude"], {})
 
-    assert "ANTHROPIC_MODEL" in merged
-    assert "ANTHROPIC_SMALL_FAST_MODEL" in merged
+    declared = {slug for slug, _label in profile.MODELS}
+    named = {merged[variable] for variable in _CLAUDE_MODEL_VARIABLES}
+    assert named <= declared
+    assert len(named) == 1
 
 
 def test_a_model_the_caller_pinned_is_preserved() -> None:
@@ -40,7 +52,9 @@ def test_a_model_the_caller_pinned_is_preserved() -> None:
     )
 
     assert merged["ANTHROPIC_MODEL"] == "chosen-by-user"
-    assert merged["ANTHROPIC_SMALL_FAST_MODEL"] == profile.small_fast_model()
+    assert merged["ANTHROPIC_DEFAULT_OPUS_MODEL"] == profile.primary_model()
+    assert merged["ANTHROPIC_SMALL_FAST_MODEL"] == profile.primary_model()
+    assert merged["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == profile.primary_model()
 
 
 def test_discovered_models_take_precedence_over_the_profile() -> None:
@@ -49,8 +63,8 @@ def test_discovered_models_take_precedence_over_the_profile() -> None:
         ["claude"], {}, available_models=("policy-only",)
     )
 
-    assert merged["ANTHROPIC_MODEL"] == "policy-only"
-    assert merged["ANTHROPIC_SMALL_FAST_MODEL"] == "policy-only"
+    for variable in _CLAUDE_MODEL_VARIABLES:
+        assert merged[variable] == "policy-only"
 
 
 def test_claude_launch_pins_all_claude_aliases_to_entitled_models() -> None:
@@ -58,27 +72,11 @@ def test_claude_launch_pins_all_claude_aliases_to_entitled_models() -> None:
         ["claude"], {}, available_models=("allowed-primary", "allowed-fast")
     )
 
-    assert merged[claude_launch.OPUS_MODEL_VARIABLE] == "allowed-primary"
-    assert merged[claude_launch.SONNET_MODEL_VARIABLE] == "allowed-primary"
-    assert merged[claude_launch.FABLE_MODEL_VARIABLE] == "allowed-primary"
-    assert merged[claude_launch.SUBAGENT_MODEL_VARIABLE] == "allowed-primary"
-    assert merged[claude_launch.HAIKU_MODEL_VARIABLE] == merged[
-        claude_launch.SMALL_FAST_MODEL_VARIABLE
-    ]
+    named = {merged[variable] for variable in _CLAUDE_MODEL_VARIABLES}
+    assert named == {"allowed-primary"}
 
 
-@pytest.mark.parametrize(
-    "variable",
-    (
-        claude_launch.MODEL_VARIABLE,
-        claude_launch.SMALL_FAST_MODEL_VARIABLE,
-        claude_launch.OPUS_MODEL_VARIABLE,
-        claude_launch.SONNET_MODEL_VARIABLE,
-        claude_launch.HAIKU_MODEL_VARIABLE,
-        claude_launch.FABLE_MODEL_VARIABLE,
-        claude_launch.SUBAGENT_MODEL_VARIABLE,
-    ),
-)
+@pytest.mark.parametrize("variable", _CLAUDE_MODEL_VARIABLES)
 def test_claude_launch_rejects_unentitled_alias_pin(variable: str) -> None:
     merged = claude_launch.augment_claude_environment(
         ["claude"],
@@ -88,6 +86,30 @@ def test_claude_launch_rejects_unentitled_alias_pin(variable: str) -> None:
 
     assert merged[variable] != "not-entitled"
     assert merged[variable] in {"allowed-primary", "allowed-fast"}
+
+
+def test_entitled_haiku_pin_wins_over_unentitled_small_fast_pin() -> None:
+    merged = claude_launch.augment_claude_environment(
+        ["claude"],
+        {
+            claude_launch.SMALL_FAST_MODEL_VARIABLE: "not-entitled",
+            claude_launch.HAIKU_MODEL_VARIABLE: "allowed-fast",
+        },
+        available_models=("allowed-primary", "allowed-fast"),
+    )
+
+    assert merged[claude_launch.SMALL_FAST_MODEL_VARIABLE] == "allowed-fast"
+    assert merged[claude_launch.HAIKU_MODEL_VARIABLE] == "allowed-fast"
+
+
+def test_haiku_pin_also_fills_the_deprecated_small_fast_variable() -> None:
+    merged = claude_launch.augment_claude_environment(
+        ["claude"],
+        {claude_launch.HAIKU_MODEL_VARIABLE: "chosen-by-user"},
+    )
+
+    assert merged[claude_launch.HAIKU_MODEL_VARIABLE] == "chosen-by-user"
+    assert merged[claude_launch.SMALL_FAST_MODEL_VARIABLE] == "chosen-by-user"
 
 
 def test_other_commands_are_left_alone() -> None:
@@ -113,8 +135,8 @@ def test_exec_claude_needs_no_shell_wrapper(monkeypatch, argv) -> None:
     assert result.exit_code == 0
     assert captured["command"] == argv
     environment = captured["env"]
-    assert environment["ANTHROPIC_MODEL"] == profile.primary_model()
-    assert environment["ANTHROPIC_SMALL_FAST_MODEL"] == profile.small_fast_model()
+    for variable in _CLAUDE_MODEL_VARIABLES:
+        assert environment[variable] == profile.primary_model()
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "ephemeral-token"
 
 

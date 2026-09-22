@@ -64,14 +64,13 @@ def select(preferences: tuple[str, ...], available: tuple[str, ...], fallback: s
 
 
 def looks_like_router(model_id: str) -> bool:
-    """Return whether an entitled id denotes a generic auto-router."""
-    lowered = model_id.casefold()
-    basename = lowered.rsplit("/", 1)[-1]
-    return (
-        any(marker in lowered for marker in _ROUTER_MARKERS)
-        or basename.endswith("-auto")
-        or basename == "auto"
-    )
+    """Return whether an entitled id denotes a generic auto-router.
+
+    Only the final path segment is classified, and markers must match that
+    segment exactly so leaf ids that merely contain those words are left alone.
+    """
+    basename = model_id.casefold().rsplit("/", 1)[-1]
+    return basename == "auto" or basename.endswith("-auto") or basename in _ROUTER_MARKERS
 
 
 def select_router(available: tuple[str, ...]) -> str | None:

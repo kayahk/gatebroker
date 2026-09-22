@@ -25,7 +25,7 @@ from keyring.errors import KeyringError, PasswordDeleteError
 from gatebroker import __version__, profile
 from gatebroker.claude_launch import augment_claude_environment, is_claude_command
 from gatebroker.codex_launch import augment_codex_command, is_codex_command
-from gatebroker.copilot_launch import augment_copilot_environment, is_copilot_command
+from gatebroker.copilot_launch import augment_copilot_environment
 from gatebroker.model_discovery import allowed_models
 
 _DEV_PROFILE_VARIABLE = "GABRO_DEV_PROFILE"
@@ -633,7 +633,7 @@ def _store_cache_unlocked(serialized: str) -> None:
     _retry_windows_cache_cleanup(active)
     pending = _pending_windows_cache_cleanup()
 
-    if len(serialized.encode("utf-16-le")) <= _WINDOWS_CREDENTIAL_MAX_BYTES:
+    if len(serialized.encode("utf-16-le")) <= _WINDOWS_CACHE_CHUNK_BYTES:
         if active:
             _record_windows_cache_cleanup([active])
         keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, serialized)
@@ -973,10 +973,16 @@ def login(agent: str | None) -> None:
 
 
 @main.command()
-@click.option("--format", "output_format", type=click.Choice(("json",)), required=True)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(("json",)),
+    default="json",
+    show_default=True,
+)
 def token(output_format: str) -> None:
     """Print a silently acquired broker token for a non-interactive caller."""
-    del output_format  # The explicit choice leaves room for future formats without defaults.
+    del output_format  # The explicit choice leaves room for future formats without a second default.
     try:
         result = _acquire_access_token_result()
         access_token = result.get("access_token")
@@ -1005,7 +1011,10 @@ def logout() -> None:
             with _windows_cache_lock():
                 serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
                 if _invalid_windows_manifest(serialized):
-                    raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout after repairing the credential entry.")
+                    raise click.ClickException(
+                        "The stored sign-in state is invalid; remove the "
+                        f"{CACHE_SERVICE} credential entries, then run {_invocation()} login."
+                    )
                 manifest = _windows_cache_manifest(serialized)
                 primary_entries = [] if manifest is None else [(manifest[0], manifest[1]), *manifest[2]]
                 entries = _merge_windows_cache_entries(_pending_windows_cache_cleanup(), primary_entries)
@@ -1039,11 +1048,7 @@ def logout() -> None:
 
 def _selects_a_model(command: Sequence[str]) -> bool:
     """Report whether this agent needs a gateway model id named for it."""
-    return (
-        is_claude_command(command)
-        or is_codex_command(command)
-        or is_copilot_command(command)
-    )
+    return is_claude_command(command) or is_codex_command(command)
 
 
 def _run_with_broker_environment(command: Sequence[str]) -> None:
