@@ -14,7 +14,7 @@ import subprocess  # nosec B404
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import click
@@ -23,9 +23,10 @@ import msal
 from keyring.errors import KeyringError, PasswordDeleteError
 
 from gatebroker import __version__, profile
+from gatebroker.build_info import build_info
 from gatebroker.claude_launch import augment_claude_environment, is_claude_command
 from gatebroker.codex_launch import augment_codex_command, is_codex_command
-from gatebroker.copilot_launch import augment_copilot_environment, is_copilot_command
+from gatebroker.copilot_launch import augment_copilot_environment
 from gatebroker.model_discovery import allowed_models
 
 _DEV_PROFILE_VARIABLE = "GABRO_DEV_PROFILE"
@@ -190,38 +191,490 @@ def _require_secure_keyring() -> None:
 
 
 def _sanitize_cache(serialized: str) -> tuple[str, bool]:
-    cache_data = json.loads(serialized)
-    removed = False
-    for token_type in ("AccessToken", "IdToken"):
-        removed = cache_data.pop(token_type, None) is not None or removed
+    cache_data = _strict_json_loads(serialized)
+    if not isinstance(cache_data, dict):
+        raise ValueError("cache must be a JSON object")
+    removed = cache_data.pop("IdToken", None) is not None
     return json.dumps(cache_data, separators=(",", ":")), removed
 
 
-def _store_cache(serialized: str) -> None:
-    _require_secure_keyring()
+_WINDOWS_CREDENTIAL_MAX_BYTES = 2_560
+_WINDOWS_CACHE_CHUNK_BYTES = 2_400
+_WINDOWS_CACHE_MANIFEST_KEY = "windows-cache-chunks"
+_WINDOWS_CACHE_CLEANUP_ACCOUNT = f"{CACHE_ACCOUNT}-chunk-cleanup"
+_WINDOWS_CACHE_MAX_CHUNKS = 1_024
+_WINDOWS_CACHE_MAX_CLEANUP_ENTRIES = 16
+_WINDOWS_CACHE_GENERATION_RETRIES = 8
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> object:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _strict_json_loads(serialized: str) -> object:
+    return json.loads(
+        serialized,
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=_reject_nonstandard_json_constant,
+    )
+
+
+def _matches_partial_windows_manifest_key(serialized: str, start: int) -> tuple[bool, int]:
+    """Lex one JSON string and match a complete or truncated reserved key."""
+    target_index = 0
+    matches = True
+    position = start + 1
+    while position < len(serialized):
+        character = serialized[position]
+        if character == '"':
+            return matches and target_index == len(_WINDOWS_CACHE_MANIFEST_KEY), position + 1
+        if character == "\\":
+            position += 1
+            if position == len(serialized):
+                return matches and target_index < len(_WINDOWS_CACHE_MANIFEST_KEY), position
+            if serialized[position] == "u":
+                digits = serialized[position + 1 : position + 5]
+                if len(digits) < 4:
+                    expected = (
+                        f"{ord(_WINDOWS_CACHE_MANIFEST_KEY[target_index]):04x}"
+                        if matches and target_index < len(_WINDOWS_CACHE_MANIFEST_KEY)
+                        else ""
+                    )
+                    return matches and digits.lower() == expected[: len(digits)], len(serialized)
+                if any(digit not in "0123456789abcdefABCDEF" for digit in digits) or (
+                    not matches
+                    or target_index == len(_WINDOWS_CACHE_MANIFEST_KEY)
+                    or digits.lower() != f"{ord(_WINDOWS_CACHE_MANIFEST_KEY[target_index]):04x}"
+                ):
+                    matches = False
+                else:
+                    target_index += 1
+                position += 5
+                continue
+            matches = False
+            position += 1
+            continue
+        if (
+            not matches
+            or target_index == len(_WINDOWS_CACHE_MANIFEST_KEY)
+            or character != _WINDOWS_CACHE_MANIFEST_KEY[target_index]
+        ):
+            matches = False
+        else:
+            target_index += 1
+        position += 1
+    return matches and target_index > 0, position
+
+
+def _contains_windows_manifest_key(serialized: str | None) -> bool:
+    """Recognize an exact or truncated top-level manifest key.
+
+    Valid ordinary cache JSON is classified structurally. For damaged JSON, a
+    small lexer follows root-object grammar: only a string where a root key is
+    expected can claim the reserved key. Complete strings are skipped with JSON
+    escape handling, so braces and brackets in prior values cannot change depth.
+    """
+    if not isinstance(serialized, str):
+        return False
     try:
-        keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, serialized)
-    except KeyringError as error:
+        decoded = _strict_json_loads(serialized)
+    except (TypeError, ValueError):
+        pass
+    else:
+        return isinstance(decoded, dict) and _WINDOWS_CACHE_MANIFEST_KEY in decoded
+
+    position = 0
+    while position < len(serialized) and serialized[position].isspace():
+        position += 1
+    if position == len(serialized) or serialized[position] != "{":
+        return False
+
+    depth = 1
+    root_state = "key"
+    position += 1
+    while position < len(serialized):
+        character = serialized[position]
+        if character.isspace():
+            position += 1
+            continue
+        if character == '"':
+            matches, end = _matches_partial_windows_manifest_key(serialized, position)
+            if depth == 1 and root_state == "key" and matches:
+                return True
+            position = end
+            if depth == 1 and root_state == "key":
+                root_state = "colon"
+            elif depth == 1 and root_state == "value":
+                root_state = "after-value"
+            continue
+        if depth == 1:
+            if root_state == "key":
+                return False
+            if root_state == "colon":
+                if character != ":":
+                    return False
+                root_state = "value"
+            elif root_state == "value":
+                if character in "{[":
+                    depth = 2
+                    position += 1
+                else:
+                    scalar_end = position
+                    while scalar_end < len(serialized) and serialized[scalar_end] not in " \t\r\n,}":
+                        scalar_end += 1
+                    try:
+                        scalar = _strict_json_loads(serialized[position:scalar_end])
+                    except (TypeError, ValueError):
+                        return False
+                    if isinstance(scalar, (dict, list, str)):
+                        return False
+                    root_state = "after-value"
+                    position = scalar_end
+                continue
+            elif root_state == "after-value":
+                if character == ",":
+                    root_state = "key"
+                elif character == "}":
+                    return False
+                else:
+                    return False
+            position += 1
+            continue
+        if character in "{[":
+            depth += 1
+        elif character in "]}":
+            depth -= 1
+            if depth == 1:
+                root_state = "after-value"
+        position += 1
+    return False
+
+
+def _cache_chunk_account(generation: str, index: int) -> str:
+    return f"{CACHE_ACCOUNT}-chunk-{generation}-{index}"
+
+
+def _split_windows_cache(serialized: str) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_bytes = 0
+    for character in serialized:
+        character_bytes = len(character.encode("utf-16-le"))
+        if current and current_bytes + character_bytes > _WINDOWS_CACHE_CHUNK_BYTES:
+            chunks.append("".join(current))
+            current = []
+            current_bytes = 0
+        current.append(character)
+        current_bytes += character_bytes
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def _valid_windows_cache_generation(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 32 and all(character in "0123456789abcdef" for character in value)
+
+
+def _valid_windows_cache_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= _WINDOWS_CACHE_MAX_CHUNKS
+
+
+def _windows_cache_manifest(serialized: str | None) -> tuple[str, int, list[tuple[str, int]]] | None:
+    if not serialized:
+        return None
+    try:
+        decoded = _strict_json_loads(serialized)
+        if not isinstance(decoded, dict) or set(decoded) != {_WINDOWS_CACHE_MANIFEST_KEY}:
+            return None
+        value = decoded[_WINDOWS_CACHE_MANIFEST_KEY]
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict) or set(value) not in ({"generation", "count"}, {"generation", "count", "cleanup"}):
+        return None
+    generation = value["generation"]
+    count = value["count"]
+    cleanup = value.get("cleanup", [])
+    if not _valid_windows_cache_generation(generation) or not _valid_windows_cache_count(count):
+        return None
+    if (
+        not isinstance(cleanup, list)
+        or len(cleanup) > _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"generation", "count"}
+            or not _valid_windows_cache_generation(item["generation"])
+            or not _valid_windows_cache_count(item["count"])
+            for item in cleanup
+        )
+    ):
+        return None
+    entries = [(item["generation"], item["count"]) for item in cleanup]
+    if len(entries) != len(set(entries)) or not _windows_cache_entries_have_consistent_counts([(generation, count), *entries]):
+        return None
+    return generation, count, entries
+
+
+def _windows_cache_manifest_document(generation: str, count: int, cleanup: list[tuple[str, int]]) -> str:
+    manifest: dict[str, object] = {"generation": generation, "count": count}
+    if cleanup:
+        manifest["cleanup"] = [{"generation": old, "count": old_count} for old, old_count in cleanup]
+    return json.dumps({_WINDOWS_CACHE_MANIFEST_KEY: manifest}, separators=(",", ":"))
+
+
+def _windows_cache_entries_have_consistent_counts(entries: list[tuple[str, int]]) -> bool:
+    counts: dict[str, int] = {}
+    for generation, count in entries:
+        existing = counts.setdefault(generation, count)
+        if existing != count:
+            return False
+    return True
+
+
+def _windows_cache_entries(value: object) -> list[tuple[str, int]] | None:
+    """Parse an exact cleanup journal; unknown data must never be discarded."""
+    if not isinstance(value, dict) or set(value) != {"cleanup"} or not isinstance(value["cleanup"], list):
+        return None
+    entries: list[tuple[str, int]] = []
+    for item in value["cleanup"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"generation", "count"}
+            or not _valid_windows_cache_generation(item["generation"])
+            or not _valid_windows_cache_count(item["count"])
+        ):
+            return None
+        entry = (item["generation"], item["count"])
+        if entry in entries:
+            return None
+        entries.append(entry)
+    if not _windows_cache_entries_have_consistent_counts(entries):
+        return None
+    return entries if len(entries) <= _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES else None
+
+
+def _pending_windows_cache_cleanup() -> list[tuple[str, int]]:
+    serialized = keyring.get_password(CACHE_SERVICE, _WINDOWS_CACHE_CLEANUP_ACCOUNT)
+    if serialized is None:
+        return []
+    try:
+        entries = _windows_cache_entries(_strict_json_loads(serialized))
+    except (TypeError, ValueError):
+        entries = None
+    if entries is None:
+        raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
+    return entries
+
+
+def _merge_windows_cache_entries(*groups: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    merged: list[tuple[str, int]] = []
+    for group in groups:
+        if len(group) != len(set(group)):
+            raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
+        for entry in group:
+            if entry not in merged:
+                merged.append(entry)
+    if not _windows_cache_entries_have_consistent_counts(merged):
+        raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
+    if len(merged) > _WINDOWS_CACHE_MAX_CLEANUP_ENTRIES:
+        raise click.ClickException("The operating-system credential store cannot save the sign-in state.")
+    return merged
+
+
+def _write_windows_cache_cleanup(entries: list[tuple[str, int]]) -> None:
+    keyring.set_password(CACHE_SERVICE, _WINDOWS_CACHE_CLEANUP_ACCOUNT, json.dumps({"cleanup": [{"generation": generation, "count": count} for generation, count in entries]}, separators=(",", ":")))
+
+
+def _record_windows_cache_cleanup(entries: list[tuple[str, int]]) -> None:
+    # Journal entries are merged, never replaced: a failed rollback must not erase an
+    # earlier orphan that only this journal can name.
+    _write_windows_cache_cleanup(_merge_windows_cache_entries(_pending_windows_cache_cleanup(), entries))
+
+
+def _retry_windows_cache_cleanup(active: tuple[str, int] | None) -> None:
+    entries = _pending_windows_cache_cleanup()
+    if active and any(generation == active[0] and count != active[1] for generation, count in entries):
+        raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
+    stale = [entry for entry in entries if active is None or entry[0] != active[0]]
+    failed = _delete_windows_cache_manifest_entries(stale)
+    remaining = _merge_windows_cache_entries([active] if active else [], failed)
+    if remaining:
+        _write_windows_cache_cleanup(remaining)
+    elif entries:
+        keyring.delete_password(CACHE_SERVICE, _WINDOWS_CACHE_CLEANUP_ACCOUNT)
+
+
+def _delete_windows_cache_generation(generation: str, count: int) -> bool:
+    for index in range(count):
+        account = _cache_chunk_account(generation, index)
+        try:
+            if keyring.get_password(CACHE_SERVICE, account) is None:
+                continue
+            keyring.delete_password(CACHE_SERVICE, account)
+        except PasswordDeleteError:
+            return False
+        except (KeyringError, OSError):
+            return False
+    return True
+
+
+def _delete_windows_cache_manifest_entries(entries: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    return [(generation, count) for generation, count in entries if not _delete_windows_cache_generation(generation, count)]
+
+
+def _windows_cache_lock_path() -> Path:
+    """Use the per-user home directory, not mutable app-data routing."""
+    return Path.home() / ".gabro" / "cache.lock"
+
+
+@contextmanager
+def _windows_cache_lock():
+    if sys.platform != "win32":
+        yield
+        return
+    import msvcrt
+
+    lock_path = _windows_cache_lock_path()
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        if lock_file.seek(0, os.SEEK_END) == 0:
+            lock_file.write(b"0")
+            lock_file.flush()
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _load_windows_chunked_cache(serialized: str) -> str:
+    with _windows_cache_lock():
+        return _load_windows_chunked_cache_unlocked(serialized)
+
+
+def _load_windows_chunked_cache_unlocked(serialized: str) -> str:
+    manifest = _windows_cache_manifest(serialized)
+    if manifest is None:
+        if _invalid_windows_manifest(serialized):
+            raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
+        return serialized
+    generation, count, _cleanup = manifest
+    try:
+        chunks = [keyring.get_password(CACHE_SERVICE, _cache_chunk_account(generation, index)) for index in range(count)]
+    except (KeyringError, OSError) as error:
         raise click.ClickException("The operating-system credential store is unavailable.") from error
+    if any(not isinstance(chunk, str) for chunk in chunks):
+        raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
+    return "".join(chunks)
+
+
+def _store_cache(serialized: str) -> None:
+    try:
+        with _windows_cache_lock():
+            _store_cache_unlocked(serialized)
+    except click.ClickException:
+        raise
+    except (KeyringError, OSError) as error:
+        raise click.ClickException("The operating-system credential store is unavailable.") from error
+
+
+def _invalid_windows_manifest(serialized: str | None) -> bool:
+    return bool(serialized) and _contains_windows_manifest_key(serialized) and _windows_cache_manifest(serialized) is None
+
+
+def _new_windows_cache_generation(forbidden_entries: list[tuple[str, int]]) -> str:
+    forbidden = {generation for generation, _count in forbidden_entries}
+    for _ in range(_WINDOWS_CACHE_GENERATION_RETRIES):
+        generation = secrets.token_hex(16)
+        if generation not in forbidden:
+            return generation
+    raise click.ClickException("The operating-system credential store cannot save the sign-in state.")
+
+
+def _store_cache_unlocked(serialized: str) -> None:
+    _require_secure_keyring()
+    if sys.platform != "win32":
+        keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, serialized)
+        return
+
+    previous = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+    if _invalid_windows_manifest(previous):
+        raise click.ClickException(f"The stored sign-in state is invalid; run {_invocation()} logout, then login.")
+    previous_manifest = _windows_cache_manifest(previous)
+    active = None if previous_manifest is None else (previous_manifest[0], previous_manifest[1])
+    embedded_cleanup = [] if previous_manifest is None else previous_manifest[2]
+
+    # Migrate cleanup carried by older manifest formats before replacing the primary
+    # pointer. A failed journal write leaves the old manifest and all its ownership intact.
+    if embedded_cleanup:
+        _record_windows_cache_cleanup(embedded_cleanup)
+
+    # Only generations other than the primary's active generation may be reaped.
+    # The journal is conservative: entries remain valid even when some chunks have
+    # already disappeared, so interruption at any point is retryable.
+    _retry_windows_cache_cleanup(active)
+    pending = _pending_windows_cache_cleanup()
+
+    if len(serialized.encode("utf-16-le")) <= _WINDOWS_CACHE_CHUNK_BYTES:
+        if active:
+            _record_windows_cache_cleanup([active])
+        keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, serialized)
+        return
+
+    chunks = _split_windows_cache(serialized)
+    if len(chunks) > _WINDOWS_CACHE_MAX_CHUNKS:
+        raise click.ClickException("The operating-system credential store cannot save the sign-in state.")
+    generation = _new_windows_cache_generation(([active] if active else []) + pending)
+    new_entry = (generation, len(chunks))
+
+    # Durable intent precedes credential data. The active old generation is also
+    # journaled before publication, so no delete is needed in the commit path.
+    _record_windows_cache_cleanup(([active] if active else []) + [new_entry])
+    for index, chunk in enumerate(chunks):
+        keyring.set_password(CACHE_SERVICE, _cache_chunk_account(generation, index), chunk)
+    # This is the sole commit point. After it succeeds the new cache is valid and
+    # cleanup remains deferred/retryable; no fallible post-commit operation runs.
+    keyring.set_password(CACHE_SERVICE, CACHE_ACCOUNT, _windows_cache_manifest_document(generation, len(chunks), []))
 
 
 def _load_cache() -> msal.SerializableTokenCache:
     cache = msal.SerializableTokenCache()
     _require_secure_keyring()
     try:
-        serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
-    except KeyringError as error:
+        if sys.platform == "win32":
+            with _windows_cache_lock():
+                serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+                if serialized:
+                    serialized = _load_windows_chunked_cache_unlocked(serialized)
+                    sanitized, removed_tokens = _sanitize_cache(serialized)
+                    if removed_tokens:
+                        _store_cache_unlocked(sanitized)
+                    cache.deserialize(sanitized)
+        else:
+            serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+            if serialized:
+                sanitized, removed_tokens = _sanitize_cache(serialized)
+                if removed_tokens:
+                    _store_cache_unlocked(sanitized)
+                cache.deserialize(sanitized)
+    except (KeyringError, OSError) as error:
         raise click.ClickException("The operating-system credential store is unavailable.") from error
-    if serialized:
-        try:
-            sanitized, removed_tokens = _sanitize_cache(serialized)
-            if removed_tokens:
-                _store_cache(sanitized)
-            cache.deserialize(sanitized)
-        except Exception as error:  # Cache contents must never be shown to the user.
-            raise click.ClickException(
-                f"The stored sign-in state is invalid; run {_invocation()} logout, then login."
-            ) from error
+    except click.ClickException:
+        raise
+    except Exception as error:  # Cache contents must never be shown to the user.
+        raise click.ClickException(
+            f"The stored sign-in state is invalid; run {_invocation()} logout, then login."
+        ) from error
     return cache
 
 
@@ -229,9 +682,9 @@ def _save_cache(cache: msal.SerializableTokenCache) -> None:
     if not cache.has_state_changed:
         return
     serialized, _removed_tokens = _sanitize_cache(cache.serialize())
-    # MSAL serializes access and ID tokens alongside refresh state. Retain only
-    # the entries necessary for a later silent refresh in the OS credential
-    # store; short-lived broker access tokens must stay process-ephemeral.
+    # MSAL serializes access and ID tokens alongside refresh state. Retain its
+    # short-lived AccessToken records and refresh state only in the OS credential
+    # store; IdToken records are stripped by _sanitize_cache.
     _store_cache(serialized)
 
 
@@ -372,7 +825,8 @@ def _retain_only_signed_in_account(
                 application.remove_account(account)
 
 
-def _acquire_access_token() -> str:
+def _acquire_access_token_result() -> Mapping[str, object]:
+    """Return a silently acquired MSAL result without starting an interactive flow."""
     _tenant_id, _client_id, scope, _base_url = _settings()
     cache = _load_cache()
     application = _application(cache)
@@ -390,9 +844,9 @@ def _acquire_access_token() -> str:
             scopes=[scope], account=accounts[0]
         )
         token = (result or {}).get("access_token")
-        if isinstance(token, str) and token:
+        if isinstance(token, str) and token and isinstance(result, Mapping):
             _save_cache(cache)
-            return token
+            return result
         reason = _renewal_failure_reason(result)
     else:
         reason = ""
@@ -400,6 +854,16 @@ def _acquire_access_token() -> str:
     raise click.ClickException(
         f"No valid GateBroker sign-in is available; run {_invocation()} login.{reason}"
     )
+
+
+def _acquire_access_token() -> str:
+    result = _acquire_access_token_result()
+    token = result.get("access_token")
+    # The result-returning helper verifies this before returning; keep this defensive
+    # boundary because callers use the string helper as a credential injection point.
+    if isinstance(token, str) and token:
+        return token
+    raise click.ClickException("No valid GateBroker sign-in is available; run login.")
 
 
 def _renewal_failure_reason(result: object) -> str:
@@ -464,6 +928,15 @@ def main() -> None:
         )
 
 
+@main.command()
+def version() -> None:
+    """Show CLI version and build information."""
+    info = build_info()
+    click.echo(f"gabro {info.version}")
+    click.echo(f"build: {info.build}")
+    click.echo(f"revision: {info.revision}")
+
+
 def _configure_local_agent(agent: str, command: Sequence[str], *, reset: bool) -> None:
     """Save a non-secret launcher profile for a local agent command."""
     if not agent:
@@ -481,7 +954,7 @@ def _configure_local_agent(agent: str, command: Sequence[str], *, reset: bool) -
 @main.command()
 @click.argument("agent", required=False)
 def login(agent: str | None) -> None:
-    """Sign in by device code and save sanitized refresh state in the OS credential store.
+    """Sign in and save sanitized MSAL state only in the OS credential store.
 
     When AGENT is provided, also save a launcher profile equivalent to
     `gabro configure AGENT -- AGENT` and immediately start it with an
@@ -501,26 +974,82 @@ def login(agent: str | None) -> None:
 
 
 @main.command()
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(("json",)),
+    default="json",
+    show_default=True,
+)
+def token(output_format: str) -> None:
+    """Print a silently acquired broker token for a non-interactive caller."""
+    del output_format  # The explicit choice leaves room for future formats without a second default.
+    try:
+        result = _acquire_access_token_result()
+        access_token = result.get("access_token")
+        expires_in = result.get("expires_in")
+        if (
+            not isinstance(access_token, str)
+            or not access_token
+            or not isinstance(expires_in, int)
+            or isinstance(expires_in, bool)
+            or expires_in <= 0
+        ):
+            raise ValueError("silent result lacks a usable expiration")
+    except Exception as error:
+        # A token command is machine-facing: emit no partial JSON or provider details,
+        # which can include credential material, and never fall back to device login.
+        raise click.ClickException("No valid GateBroker sign-in is available; run login.") from error
+    click.echo(json.dumps({"access_token": access_token, "expires_in": expires_in}, separators=(",", ":")))
+
+
+@main.command()
 def logout() -> None:
     """Remove the local sanitized MSAL cache from the OS credential store."""
     try:
         _require_secure_keyring()
-        if keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT) is None:
-            click.echo("No local GateBroker sign-in state was found.")
-            return
-        keyring.delete_password(CACHE_SERVICE, CACHE_ACCOUNT)
+        if sys.platform == "win32":
+            with _windows_cache_lock():
+                serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+                if _invalid_windows_manifest(serialized):
+                    raise click.ClickException(
+                        "The stored sign-in state is invalid; remove the "
+                        f"{CACHE_SERVICE} credential entries, then run {_invocation()} login."
+                    )
+                manifest = _windows_cache_manifest(serialized)
+                primary_entries = [] if manifest is None else [(manifest[0], manifest[1]), *manifest[2]]
+                entries = _merge_windows_cache_entries(_pending_windows_cache_cleanup(), primary_entries)
+                if serialized is None and not entries:
+                    click.echo("No local GateBroker sign-in state was found.")
+                    return
+                if entries:
+                    _write_windows_cache_cleanup(entries)
+                # Remove the pointer before its chunks. If this delete fails, the old
+                # cache is still complete; after it succeeds, the journal owns cleanup.
+                if serialized is not None:
+                    keyring.delete_password(CACHE_SERVICE, CACHE_ACCOUNT)
+                failed = _delete_windows_cache_manifest_entries(entries)
+                if failed:
+                    _write_windows_cache_cleanup(failed)
+                    raise click.ClickException("The operating-system credential store is unavailable.")
+                if entries:
+                    keyring.delete_password(CACHE_SERVICE, _WINDOWS_CACHE_CLEANUP_ACCOUNT)
+        else:
+            serialized = keyring.get_password(CACHE_SERVICE, CACHE_ACCOUNT)
+            if serialized is None:
+                click.echo("No local GateBroker sign-in state was found.")
+                return
+            keyring.delete_password(CACHE_SERVICE, CACHE_ACCOUNT)
         click.echo("Signed out. Local GateBroker sign-in state has been removed.")
-    except (KeyringError, PasswordDeleteError) as error:
+    except click.ClickException:
+        raise
+    except (KeyringError, PasswordDeleteError, OSError) as error:
         raise click.ClickException("The operating-system credential store is unavailable.") from error
 
 
 def _selects_a_model(command: Sequence[str]) -> bool:
     """Report whether this agent needs a gateway model id named for it."""
-    return (
-        is_claude_command(command)
-        or is_codex_command(command)
-        or is_copilot_command(command)
-    )
+    return is_claude_command(command) or is_codex_command(command)
 
 
 def _run_with_broker_environment(command: Sequence[str]) -> None:

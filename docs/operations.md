@@ -125,3 +125,28 @@ The broker does not meter tokens or spend; it forwards a request and records tha
 it did. Take usage and cost from the upstream gateway, which sees the actual
 completions. The policy id in the audit event is what lets you attribute that
 usage back to an entitlement group.
+
+## Upstream gateway
+
+`GABRO_UPSTREAM_BASE_URL` and `GABRO_UPSTREAM_TRUSTED_HOSTS` name any
+OpenAI- or Anthropic-compatible gateway. The broker does not know or care which
+product sits behind that URL: LiteLLM, a vendor proxy, or a same-cluster mock
+are interchangeable as long as they speak the forwarded paths. There is no
+product-specific alias and no second upstream client.
+
+The hop is fail-closed. The host must be in the trusted set, and the URL must be
+HTTPS on 443 unless `GABRO_UPSTREAM_ALLOW_CLUSTER_LOCAL_PLAINTEXT` is exactly
+`true` and the host is in-cluster Service DNS.
+
+## Distributed traces
+
+When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the runtime exports request and
+upstream spans over OTLP/gRPC. Nothing is exported when the variable is absent
+or blank, so an unconfigured deployment stays silent.
+
+The broker injects only W3C `traceparent` / `tracestate` into the upstream
+call. W3C baggage is dropped so a caller cannot smuggle attributes into the
+gateway. Span attributes never include bodies, credentials, headers, or
+identity claims; client address and user-agent fields captured by framework
+instrumentation are stripped before export. `/healthz` and `/readyz` are
+excluded.

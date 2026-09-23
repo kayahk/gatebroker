@@ -153,19 +153,26 @@ explains what the platform around it must provide.
 ## Local agents: the `gabro` CLI
 
 The other half of the project is a credential helper for developer machines. It
-signs a user in and hands a short-lived token to exactly one child process:
+signs a user in and either hands a short-lived token to one child process or emits
+one for a trusted credential helper:
 
 ```shell
-gabro login                  # device-code sign-in; only renewal state is stored
+gabro login                  # device-code sign-in; cache stays in OS credential store
 gabro configure claude -- claude
 gabro run claude             # starts Claude Code against the gateway
+gabro token --format json    # prints a sensitive bearer token for a trusted helper
 gabro logout
 ```
 
-The token lives in the spawned process and nowhere else — not in a shell profile,
-not in the agent's config file, not in shell history. Claude Code, OpenCode,
-Codex, and the GitHub Copilot CLI are handled, including the ones that ignore
-`OPENAI_BASE_URL` and need their own provider variables.
+The child receives a short-lived access token through its environment. MSAL's cached
+AccessToken records and refresh state are persisted only in the OS credential store;
+IdToken records are stripped. `gabro token --format json` is an explicit exception to
+the child-process boundary: it writes a short-lived bearer token to stdout only for a
+trusted credential helper. Do not redirect, log, or persist that output. No token is
+written to a shell profile, agent config, log, or child-owned persistence. Claude Code,
+OpenCode, Codex, and the GitHub Copilot
+CLI are handled, including the ones that ignore `OPENAI_BASE_URL` and need their own
+provider variables.
 
 `gabro` compiles in its tenant, client, scope, and gateway URL on purpose: if
 those were environment-configurable, a shell profile could redirect a freshly

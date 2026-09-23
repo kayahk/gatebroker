@@ -60,6 +60,8 @@ After the tag runs, confirm that:
 
 The tag drives the CLI version and the container tag. Keep `version` in
 `pyproject.toml` and `__version__` in `gatebroker/__init__.py` in step with it.
+A released `gabro` binary embeds that tag and the commit SHA; `gabro version`
+prints them without probing Git or the credential store.
 
 A deployment should pin an image digest or a commit-SHA tag, never a moving tag.
 The image workflow publishes the commit SHA for exactly this reason.

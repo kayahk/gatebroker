@@ -11,9 +11,12 @@ means knowing to write
 
 which is not something a user could reasonably infer.
 
-Claude Code asks for two models: the main one, and a cheaper one for background work such
-as summarising and titling. Both have to name models the policy allows, or the background
-requests fail on their own while the session appears healthy.
+Claude Code has several slots (session, opus/sonnet/haiku/fable aliases, Plan Mode
+Explore subagents). They all have to name the same allowed gateway model. Mapping those
+aliases onto a cheap/expensive pair teaches a hierarchy the entitlement catalog does not
+have, and leaving any slot on an Anthropic id makes Plan Mode fail with a generic 403.
+One allowed id -- a router when the policy lists one, otherwise the preferred primary --
+is enough.
 
 No credential material is set here. The token is supplied separately and stays in the
 spawned process.
@@ -25,10 +28,26 @@ from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath, PureWindowsPath
 
 from gatebroker import profile
-from gatebroker.model_discovery import select
+from gatebroker.model_discovery import select_claude_model
 
 MODEL_VARIABLE = "ANTHROPIC_MODEL"
 SMALL_FAST_MODEL_VARIABLE = "ANTHROPIC_SMALL_FAST_MODEL"
+# Family aliases Plan Mode and ``/model`` resolve independently of ANTHROPIC_MODEL.
+OPUS_MODEL_VARIABLE = "ANTHROPIC_DEFAULT_OPUS_MODEL"
+SONNET_MODEL_VARIABLE = "ANTHROPIC_DEFAULT_SONNET_MODEL"
+HAIKU_MODEL_VARIABLE = "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+FABLE_MODEL_VARIABLE = "ANTHROPIC_DEFAULT_FABLE_MODEL"
+# Explore/Plan subagents can send a full Anthropic id; this overrides that choice.
+SUBAGENT_MODEL_VARIABLE = "CLAUDE_CODE_SUBAGENT_MODEL"
+_MODEL_VARIABLES = (
+    MODEL_VARIABLE,
+    SMALL_FAST_MODEL_VARIABLE,
+    OPUS_MODEL_VARIABLE,
+    SONNET_MODEL_VARIABLE,
+    HAIKU_MODEL_VARIABLE,
+    FABLE_MODEL_VARIABLE,
+    SUBAGENT_MODEL_VARIABLE,
+)
 
 
 def is_claude_command(command: Sequence[str]) -> bool:
@@ -44,12 +63,19 @@ def is_claude_command(command: Sequence[str]) -> bool:
     return executable in {"claude", "claude.exe"}
 
 
-def claude_model_environment(*, model: str, small_fast_model: str) -> dict[str, str]:
+def claude_model_environment(*, model: str) -> dict[str, str]:
     """Return the non-secret model variables Claude Code reads."""
-    return {
-        MODEL_VARIABLE: model,
-        SMALL_FAST_MODEL_VARIABLE: small_fast_model,
-    }
+    return {variable: model for variable in _MODEL_VARIABLES}
+
+
+def _first_approved_pin(
+    pins: tuple[str | None, ...], available_models: tuple[str, ...], default: str
+) -> str:
+    """Keep the first non-empty pin that discovery cannot reject or approves."""
+    for pin in pins:
+        if pin and (not available_models or pin in available_models):
+            return pin
+    return default
 
 
 def augment_claude_environment(
@@ -70,17 +96,16 @@ def augment_claude_environment(
     merged = dict(environment)
     if not is_claude_command(command):
         return merged
-    preference = profile.model_preference()
-    merged.update(
-        claude_model_environment(
-            model=merged.get(MODEL_VARIABLE)
-            or select(preference, available_models, profile.primary_model()),
-            small_fast_model=merged.get(SMALL_FAST_MODEL_VARIABLE)
-            or select(
-                (profile.small_fast_model(), *reversed(preference)),
-                available_models,
-                profile.small_fast_model(),
-            ),
-        )
+    default = select_claude_model(available_models, profile.primary_model())
+    defaults = claude_model_environment(model=default)
+    selected_small = _first_approved_pin(
+        (environment.get(SMALL_FAST_MODEL_VARIABLE), environment.get(HAIKU_MODEL_VARIABLE)),
+        available_models,
+        default,
     )
+    for key, value in defaults.items():
+        if key not in {SMALL_FAST_MODEL_VARIABLE, HAIKU_MODEL_VARIABLE}:
+            merged[key] = _first_approved_pin((merged.get(key),), available_models, value)
+    merged[SMALL_FAST_MODEL_VARIABLE] = selected_small
+    merged[HAIKU_MODEL_VARIABLE] = selected_small
     return merged

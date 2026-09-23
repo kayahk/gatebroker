@@ -1,12 +1,16 @@
 # The `gabro` CLI
 
-`gabro` signs a user in with their organization's identity provider and hands a
-short-lived gateway token to one child process. It never gives the user, or the
+`gabro` signs a user in with their organization's identity provider and normally
+hands a short-lived gateway token to one child process. It never gives the user, or the
 agent, the upstream gateway key.
 
-Its whole job is that boundary. Everything below is in service of one property:
-the credential exists in the spawned process and nowhere else — not in a shell
-profile, not in an agent's configuration file, not in your shell history.
+Its whole job is that boundary. The child receives a short-lived access token through
+its environment. MSAL's cached AccessToken records and refresh state are persisted
+only in the OS credential store; IdToken records are stripped. Tokens are never
+written to shell profiles, agent configuration files, logs, or child-owned
+persistence. `gabro token` (or `gabro token --format json`) deliberately writes a short-lived bearer token
+to stdout for a trusted credential helper; treat its stdout as sensitive and never log,
+redirect, or persist it.
 
 ## Install
 
@@ -64,8 +68,8 @@ gabro --help
 
 ```sh
 # Device-code sign-in. Copies the code and opens the verification page when it
-# can, and keeps both visible when it cannot. Only renewal state is persisted,
-# in the OS credential store.
+# can. MSAL AccessToken records and refresh state are persisted only in the OS
+# credential store; IdToken records are stripped.
 gabro login
 
 # Sign in, save a launcher profile, and start the agent in one step. Equivalent
@@ -83,8 +87,15 @@ gabro run claude -- --model your-allowed-model
 # One-off launch without saving a profile.
 gabro exec -- your-compatible-client
 
+# Emit compact JSON containing a short-lived bearer token for a trusted credential
+# helper. stdout is sensitive: never redirect, log, or persist it.
+gabro token --format json
+
 # Remove local renewal state. Reports whether state existed.
 gabro logout
+
+# Show the installed version and, for a released binary, the embedded revision.
+gabro version
 ```
 
 `exec` and `run` set `OPENAI_BASE_URL` and `OPENAI_API_KEY` for
@@ -153,14 +164,10 @@ part that needs help: Claude Code defaults to Anthropic's own names, which an en
 policy is unlikely to list, so the broker refuses every request with a generic `403` and
 nothing points at the model as the cause. `gabro` therefore asks the broker which models
 *this* user may use — `GET /v1/models`, answered from the caller's resolved policy — and
-sets both of the variables Claude Code reads:
-
-- `ANTHROPIC_MODEL` — the session model.
-- `ANTHROPIC_SMALL_FAST_MODEL` — the cheaper model used for background work such as
-  summarising and titling.
-
-Both matter. With only the session model set, the session looks healthy while background
-requests fail on their own.
+sets every Claude Code family slot to the same allowed id — a router when the policy
+lists one, otherwise the preferred primary. Mapping opus/haiku onto a cheap/expensive
+pair would teach a hierarchy the catalog does not have, and leaving any slot on an
+Anthropic id makes Plan Mode fail with a generic `403`.
 
 Because the list comes from the policy rather than from `gabro`, a policy that grows a
 model grants it without a new release, and nobody is pinned to a subset of what they are

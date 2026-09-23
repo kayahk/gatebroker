@@ -105,6 +105,26 @@ def test_plaintext_upstream_opt_in_builds_direct_cluster_local_app(tmp_path: Pat
     assert app is not None
 
 
+def test_runtime_configures_telemetry_for_the_upstream_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_path = tmp_path / "policies.json"
+    policy_path.write_text(json.dumps(POLICIES), encoding="utf-8")
+    configured = []
+    monkeypatch.setattr(
+        runtime, "configure_telemetry", lambda app, client: configured.append((app, client))
+    )
+
+    app = create_runtime_app(
+        load_runtime_settings(runtime_environment(policy_path)),
+        token_verifier=lambda _token: {},
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+    )
+
+    assert configured[0][0] is app
+    assert configured[0][1] is app.state.upstream_client
+
+
 @pytest.mark.parametrize("value", ["yes", "True", "1", "", " true ", "true\n"])
 def test_rejects_non_boolean_plaintext_upstream_opt_in(tmp_path: Path, value: str) -> None:
     policy_path = tmp_path / "policies.json"

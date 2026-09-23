@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -11,6 +12,7 @@ from click.testing import CliRunner
 
 import gatebroker.cli as cli
 from gatebroker import profile
+from gatebroker.build_info import BuildInfo
 
 
 @pytest.fixture(autouse=True)
@@ -71,7 +73,13 @@ def test_login_uses_device_flow_and_never_prints_access_token(monkeypatch) -> No
     assert "Authentication completed." in result.output
     assert profile.BASE_URL in result.output
     assert token not in result.output
-    assert stored == {cli.CACHE_ACCOUNT: '{"RefreshToken":{"refresh":"refresh-state"}}'}
+    assert stored == {
+        cli.CACHE_ACCOUNT: (
+            '{"AccessToken":{"access":"access-token-must-not-appear-in-output"},'
+            '"RefreshToken":{"refresh":"refresh-state"}}'
+        )
+    }
+    assert "id-token-must-not-be-stored" not in stored[cli.CACHE_ACCOUNT]
     application.acquire_token_by_device_flow.assert_called_once()
 
 
@@ -323,7 +331,7 @@ def test_silent_token_acquisition_rejects_multiple_cached_accounts(monkeypatch) 
     with pytest.raises(click.ClickException, match="Multiple cached accounts"):
         cli._acquire_access_token()
 
-    application.acquire_token_silent.assert_not_called()
+    application.acquire_token_silent_with_error.assert_not_called()
 
 
 def test_exec_reports_a_missing_child_command_without_a_traceback(monkeypatch) -> None:
@@ -356,9 +364,290 @@ def test_exec_reports_other_os_errors_without_a_traceback(monkeypatch) -> None:
 
 
 
+def _memory_keyring(monkeypatch) -> dict[tuple[str, str], str]:
+    stored: dict[tuple[str, str], str] = {}
+    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: stored.get((service, account)))
+    monkeypatch.setattr(
+        cli.keyring,
+        "set_password",
+        lambda service, account, value: stored.__setitem__((service, account), value),
+    )
+    monkeypatch.setattr(
+        cli.keyring,
+        "delete_password",
+        lambda service, account: stored.pop((service, account), None),
+    )
+    return stored
+
+
+@contextmanager
+def _no_windows_cache_lock():
+    yield
+
+
+def test_windows_small_cache_stays_in_the_primary_keyring_entry(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+
+    cli._store_cache('{"RefreshToken":{"refresh":"state"}}')
+
+    assert stored == {(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT): '{"RefreshToken":{"refresh":"state"}}'}
+
+
+def test_windows_payload_above_chunk_slack_is_split(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    payload = "x" * (cli._WINDOWS_CACHE_CHUNK_BYTES // 2 + 1)
+
+    cli._store_cache(payload)
+
+    manifest = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
+    assert manifest["count"] >= 2
+    assert cli._load_windows_chunked_cache(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)]) == payload
+
+
+def test_windows_small_write_keeps_old_manifest_when_cleanup_fails(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    cli._store_cache("x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    old_manifest = stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)]
+    old = json.loads(old_manifest)[cli._WINDOWS_CACHE_MANIFEST_KEY]
+    real_delete = cli.keyring.delete_password
+
+    def delete_password(service, account):
+        if account == cli._cache_chunk_account(old["generation"], 0):
+            raise OSError("sensitive backend failure")
+        real_delete(service, account)
+
+    monkeypatch.setattr(cli.keyring, "delete_password", delete_password)
+    cli._store_cache('{"RefreshToken":{"refresh":"state"}}')
+
+    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == '{"RefreshToken":{"refresh":"state"}}'
+    pending = json.loads(stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)])
+    assert pending["cleanup"] == [{"generation": old["generation"], "count": old["count"]}]
+
+
+def test_windows_cache_splits_utf16_and_reassembles(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    payload = "😀" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 4 + 1)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+
+    cli._store_cache(payload)
+
+    manifest = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
+    assert manifest["count"] == 2
+    assert all(len(value.encode("utf-16-le")) <= cli._WINDOWS_CACHE_CHUNK_BYTES for (service, account), value in stored.items() if account != cli.CACHE_ACCOUNT)
+    assert cli._load_windows_chunked_cache(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)]) == payload
+
+
+@pytest.mark.parametrize("count", [True, 0, 1_025])
+def test_windows_invalid_manifest_counts_fail_closed(monkeypatch, count) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    monkeypatch.setattr(cli, "_invocation", lambda: "gabro")
+    document = json.dumps({cli._WINDOWS_CACHE_MANIFEST_KEY: {"generation": "a" * 32, "count": count}})
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._load_windows_chunked_cache(document)
+
+
+def test_windows_escaped_manifest_key_fails_closed(monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    monkeypatch.setattr(cli, "_invocation", lambda: "gabro")
+    document = '{"windows-cache-ch\\u0075nks":{"generation":"bad","count":1}}'
+
+    with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
+        cli._load_windows_chunked_cache(document)
+
+
+def test_windows_large_to_small_primary_write_failure_preserves_old_chunks(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    cli._store_cache("x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    old_primary = stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)]
+    old_accounts = set(stored)
+    real_set = cli.keyring.set_password
+
+    def fail_small_primary(service, account, value):
+        if account == cli.CACHE_ACCOUNT and value == "small":
+            raise OSError("primary write failed")
+        real_set(service, account, value)
+
+    monkeypatch.setattr(cli.keyring, "set_password", fail_small_primary)
+    with pytest.raises(click.ClickException, match="credential store is unavailable"):
+        cli._store_cache("small")
+
+    assert stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] == old_primary
+    assert set(stored) == old_accounts
+
+
+def test_windows_partial_write_rollback_cleanup_failure_is_recorded_for_retry(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    cli._store_cache("x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    old_manifest = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
+    new_generation = "b" * 32
+    new_account = cli._cache_chunk_account(new_generation, 0)
+    real_set = cli.keyring.set_password
+    real_delete = cli.keyring.delete_password
+
+    monkeypatch.setattr(cli.secrets, "token_hex", lambda _count: new_generation)
+
+    def fail_second_chunk(service, account, value):
+        if account == cli._cache_chunk_account(new_generation, 1):
+            raise OSError("chunk write failed")
+        real_set(service, account, value)
+
+    def fail_rollback_cleanup(service, account):
+        if account == new_account:
+            raise OSError("cleanup failed")
+        real_delete(service, account)
+
+    monkeypatch.setattr(cli.keyring, "set_password", fail_second_chunk)
+    monkeypatch.setattr(cli.keyring, "delete_password", fail_rollback_cleanup)
+    with pytest.raises(click.ClickException, match="credential store is unavailable"):
+        cli._store_cache("y" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+
+    pending = json.loads(stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)])
+    assert {item["generation"] for item in pending["cleanup"]} == {old_manifest["generation"], new_generation}
+    assert next(item["count"] for item in pending["cleanup"] if item["generation"] == new_generation) == 2
+    assert (cli.CACHE_SERVICE, new_account) in stored
+
+
+def test_windows_load_reads_primary_and_chunks_under_one_lock(monkeypatch) -> None:
+    events: list[str] = []
+    lock_held = False
+
+    @contextmanager
+    def tracking_lock():
+        nonlocal lock_held
+        events.append("lock")
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+            events.append("unlock")
+
+    manifest = cli._windows_cache_manifest_document("a" * 32, 1, [])
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", tracking_lock)
+    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: events.append(f"get:{account}:{lock_held}") or (manifest if account == cli.CACHE_ACCOUNT else '{"RefreshToken":{}}'))
+
+    cli._load_cache()
+
+    assert f"get:{cli.CACHE_ACCOUNT}:True" in events
+    assert events == ["lock", f"get:{cli.CACHE_ACCOUNT}:True", f"get:{cli._cache_chunk_account('a' * 32, 0)}:True", "unlock"]
+
+
+def test_windows_partial_write_preserves_old_cache_and_cleans_new_chunks(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    old = "old cache"
+    payload = "x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1)
+    calls = 0
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)] = old
+
+    def set_password(service, account, value):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("sensitive backend failure")
+        stored[(service, account)] = value
+
+    monkeypatch.setattr(cli.keyring, "set_password", set_password)
+
+    with pytest.raises(click.ClickException, match="credential store is unavailable") as raised:
+        cli._store_cache(payload)
+
+    assert old == stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)]
+    assert all("sensitive backend failure" not in str(error) for error in [raised.value])
+    assert stored[(cli.CACHE_SERVICE, cli._WINDOWS_CACHE_CLEANUP_ACCOUNT)]
+
+
+def test_windows_manifest_switches_only_after_all_chunks_are_written(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    events: list[str] = []
+    payload = "x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+
+    def set_password(service, account, value):
+        events.append(account)
+        stored[(service, account)] = value
+
+    monkeypatch.setattr(cli.keyring, "set_password", set_password)
+    cli._store_cache(payload)
+
+    manifest_indices = [index for index, account in enumerate(events) if account == cli.CACHE_ACCOUNT]
+    assert manifest_indices[0] == len([account for account in events if "-chunk-" in account])
+    assert all("-chunk-" in account for account in events[:manifest_indices[0]])
+
+
+def test_windows_cleanup_failure_is_recorded_and_retried(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    cli._store_cache("a" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    old_manifest = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
+    old_chunks = [cli._cache_chunk_account(old_manifest["generation"], index) for index in range(old_manifest["count"])]
+    real_delete = cli.keyring.delete_password
+    failed_once = True
+
+    def delete_password(service, account):
+        nonlocal failed_once
+        if account == old_chunks[0] and failed_once:
+            failed_once = False
+            raise OSError("sensitive backend failure")
+        real_delete(service, account)
+
+    monkeypatch.setattr(cli.keyring, "delete_password", delete_password)
+    cli._store_cache("b" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    current = json.loads(stored[(cli.CACHE_SERVICE, cli.CACHE_ACCOUNT)])[cli._WINDOWS_CACHE_MANIFEST_KEY]
+    assert current["generation"] != old_manifest["generation"]
+    cli._store_cache("c" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    cli._store_cache("d" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+    assert all((cli.CACHE_SERVICE, account) not in stored for account in old_chunks)
+
+
+def test_windows_logout_removes_manifest_chunks(monkeypatch) -> None:
+    stored = _memory_keyring(monkeypatch)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    cli._store_cache("x" * (cli._WINDOWS_CREDENTIAL_MAX_BYTES // 2 + 1))
+
+    result = CliRunner().invoke(cli.main, ["logout"])
+
+    assert result.exit_code == 0
+    assert stored == {}
+
+
+def test_windows_keyring_and_os_errors_are_sanitized(monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_cache_lock", _no_windows_cache_lock, raising=False)
+    monkeypatch.setattr(cli.keyring, "get_password", Mock(side_effect=OSError("secret backend detail")))
+
+    with pytest.raises(click.ClickException, match="credential store is unavailable") as raised:
+        cli._load_cache()
+
+    assert "secret backend detail" not in str(raised.value)
+
+
 def test_logout_removes_only_the_secure_token_cache(monkeypatch) -> None:
     deleted: list[tuple[str, str]] = []
-    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: "serialized-cache")
+    monkeypatch.setattr(
+        cli.keyring,
+        "get_password",
+        lambda service, account: "serialized-cache" if account == cli.CACHE_ACCOUNT else None,
+    )
     monkeypatch.setattr(cli.keyring, "delete_password", lambda service, account: deleted.append((service, account)))
 
     result = CliRunner().invoke(cli.main, ["logout"])
@@ -408,8 +697,91 @@ def test_failed_silent_refresh_persists_changed_cache_before_requiring_login(mon
     assert saved == {cli.CACHE_ACCOUNT: '{"RefreshToken":{"refresh":"cleaned-refresh-state"}}'}
 
 
+def test_token_json_emits_a_compact_silent_result_without_device_login(monkeypatch) -> None:
+    token = "silent-access-token"
+    device_login = Mock()
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        lambda: {"access_token": token, "expires_in": 300},
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "_device_code_login", device_login)
+
+    result = CliRunner().invoke(cli.main, ["token"])
+
+    assert result.exit_code == 0
+    assert result.output == '{"access_token":"silent-access-token","expires_in":300}\n'
+    device_login.assert_not_called()
+
+
+def test_token_json_format_flag_matches_the_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        lambda: {"access_token": "silent-access-token", "expires_in": 300},
+        raising=False,
+    )
+
+    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert result.output == '{"access_token":"silent-access-token","expires_in":300}\n'
+
+
+@pytest.mark.parametrize("expires_in", [True, 0, -1, 1.5, "300", None])
+def test_token_json_rejects_invalid_expiry_without_leaking_token(monkeypatch, expires_in) -> None:
+    secret = "secret-access-token"
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        lambda: {"access_token": secret, "expires_in": expires_in},
+        raising=False,
+    )
+
+    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+
+    assert result.exit_code != 0
+    assert secret not in result.output
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+def test_token_json_does_not_swallow_process_interruptions(monkeypatch, interruption) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        Mock(side_effect=interruption()),
+        raising=False,
+    )
+
+    assert cli.token.callback is not None
+    with pytest.raises(interruption):
+        cli.token.callback("json")
+
+def test_token_json_failure_never_leaks_a_token_or_starts_device_login(monkeypatch) -> None:
+    secret = "secret-access-token"
+    device_login = Mock()
+    monkeypatch.setattr(
+        cli,
+        "_acquire_access_token_result",
+        Mock(side_effect=click.ClickException(f"renewal failed: {secret}")),
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "_device_code_login", device_login)
+
+    result = CliRunner().invoke(cli.main, ["token", "--format", "json"])
+
+    assert result.exit_code != 0
+    assert secret not in result.output
+    device_login.assert_not_called()
+
+
 def test_logout_surfaces_a_failed_delete_for_an_existing_cache(monkeypatch) -> None:
-    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: "serialized-cache")
+    monkeypatch.setattr(
+        cli.keyring,
+        "get_password",
+        lambda service, account: "serialized-cache" if account == cli.CACHE_ACCOUNT else None,
+    )
     monkeypatch.setattr(cli.keyring, "delete_password", Mock(side_effect=cli.PasswordDeleteError("denied")))
 
     result = CliRunner().invoke(cli.main, ["logout"])
@@ -419,7 +791,7 @@ def test_logout_surfaces_a_failed_delete_for_an_existing_cache(monkeypatch) -> N
     assert "denied" not in result.output
 
 
-def test_load_cache_rewrites_legacy_access_and_id_tokens_before_use(monkeypatch) -> None:
+def test_load_cache_rewrites_legacy_id_tokens_but_retains_access_tokens(monkeypatch) -> None:
     legacy_cache = json.dumps(
         {
             "AccessToken": {"old-access": "legacy-access-token"},
@@ -428,13 +800,21 @@ def test_load_cache_rewrites_legacy_access_and_id_tokens_before_use(monkeypatch)
         }
     )
     stored: dict[str, str] = {}
-    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: legacy_cache)
+    monkeypatch.setattr(
+        cli.keyring,
+        "get_password",
+        lambda service, account: legacy_cache if account == cli.CACHE_ACCOUNT else None,
+    )
     monkeypatch.setattr(cli.keyring, "set_password", lambda service, account, value: stored.update({account: value}))
 
     cli._load_cache()
 
-    assert stored == {cli.CACHE_ACCOUNT: '{"RefreshToken":{"refresh":"refresh-state"}}'}
-    assert "legacy-access-token" not in stored[cli.CACHE_ACCOUNT]
+    assert stored == {
+        cli.CACHE_ACCOUNT: (
+            '{"AccessToken":{"old-access":"legacy-access-token"},'
+            '"RefreshToken":{"refresh":"refresh-state"}}'
+        )
+    }
     assert "legacy-id-token" not in stored[cli.CACHE_ACCOUNT]
 
 
@@ -446,7 +826,7 @@ def test_rejects_an_unapproved_credential_store_backend(monkeypatch) -> None:
         cli._require_secure_keyring()
 
 
-def test_load_cache_scrubs_legacy_tokens_even_when_deserialization_fails(monkeypatch) -> None:
+def test_load_cache_scrubs_id_tokens_even_when_deserialization_fails(monkeypatch) -> None:
     legacy_cache = json.dumps(
         {
             "AccessToken": {"old-access": "legacy-access-token"},
@@ -461,13 +841,23 @@ def test_load_cache_scrubs_legacy_tokens_even_when_deserialization_fails(monkeyp
             raise ValueError("malformed")
 
     monkeypatch.setattr(cli.msal, "SerializableTokenCache", InvalidCache)
-    monkeypatch.setattr(cli.keyring, "get_password", lambda service, account: legacy_cache)
+    monkeypatch.setattr(
+        cli.keyring,
+        "get_password",
+        lambda service, account: legacy_cache if account == cli.CACHE_ACCOUNT else None,
+    )
     monkeypatch.setattr(cli.keyring, "set_password", lambda service, account, value: stored.update({account: value}))
 
     with pytest.raises(click.ClickException, match="stored sign-in state is invalid"):
         cli._load_cache()
 
-    assert stored == {cli.CACHE_ACCOUNT: '{"RefreshToken":{"refresh":"refresh-state"}}'}
+    assert stored == {
+        cli.CACHE_ACCOUNT: (
+            '{"AccessToken":{"old-access":"legacy-access-token"},'
+            '"RefreshToken":{"refresh":"refresh-state"}}'
+        )
+    }
+    assert "legacy-id-token" not in stored[cli.CACHE_ACCOUNT]
 
 
 def test_unconfigured_distribution_refuses_to_acquire_a_token(monkeypatch) -> None:
@@ -660,6 +1050,19 @@ def test_a_profile_that_fails_validation_leaves_the_module_untouched(
 
     assert state() == before
     assert profile.DEVELOPMENT is False
+
+
+def test_version_command_reports_build_information_without_credentials(monkeypatch) -> None:
+    info = BuildInfo(version="1.2.3", build="release", revision="a" * 40)
+    monkeypatch.setattr(cli, "build_info", lambda: info)
+    monkeypatch.setattr(
+        cli.keyring, "get_password", Mock(side_effect=AssertionError("must not read keyring"))
+    )
+
+    result = CliRunner().invoke(cli.main, ["version"])
+
+    assert result.exit_code == 0
+    assert result.output == f"gabro 1.2.3\nbuild: release\nrevision: {'a' * 40}\n"
 
 
 def test_version_reports_an_unconfigured_build(monkeypatch) -> None:

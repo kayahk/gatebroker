@@ -119,7 +119,9 @@ watch the broker refuse a model or an identity that resolves to no policy.
 
 Then start something through the gateway. If you do not have an OpenAI-compatible agent
 to hand, a shell is enough to see it working: `exec` puts the endpoint and a short-lived
-token in the child process, and nowhere else.
+token in the child process. MSAL may also retain that short-lived access token and renewal
+state in the operating-system credential store; it is never written to shell profiles,
+agent configuration, logs, or child-owned persistence.
 
 ```shell
 uv run gabro exec -- sh -c 'curl -s "$OPENAI_BASE_URL/chat/completions" \

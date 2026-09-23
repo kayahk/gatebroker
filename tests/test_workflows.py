@@ -63,6 +63,16 @@ def test_release_builds_every_supported_platform_with_checksums() -> None:
     assert 'python-version: "3.11"' in workflow
 
 
+def test_the_release_embeds_and_runs_gabro_version() -> None:
+    """A released binary must identify itself without probing Git or credentials."""
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert 'build_info="${RUNNER_TEMP}/gabro_build_info.json"' in workflow
+    assert '"${executable}" version' in workflow
+    assert 'grep -Fx "gabro ${GITHUB_REF_NAME#v}" build-info.txt' in workflow
+    assert 'grep -Fx "revision: ${GITHUB_SHA}" build-info.txt' in workflow
+
+
 def test_release_signs_macos_when_configured_and_labels_it_when_not() -> None:
     """A fork without an Apple account still gets a release, clearly unsigned."""
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
