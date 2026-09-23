@@ -93,6 +93,9 @@ gabro token --format json
 
 # Remove local renewal state. Reports whether state existed.
 gabro logout
+
+# Show the installed version and, for a released binary, the embedded revision.
+gabro version
 ```
 
 `exec` and `run` set `OPENAI_BASE_URL` and `OPENAI_API_KEY` for

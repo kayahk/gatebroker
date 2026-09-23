@@ -33,6 +33,7 @@ from .forwarding import (
 )
 from .oidc import TokenValidationConfig, TokenVerifier
 from .policy import load_policies
+from .telemetry import configure_telemetry
 
 _JWKS_REFRESH_SECONDS = 300
 _JWKS_STALE_SECONDS = 900
@@ -373,6 +374,7 @@ def create_runtime_app(
         transport=transport,
         ssl_context=build_ssl_context(settings),
     )
+    configure_telemetry(app, app.state.upstream_client)
 
     if isinstance(verifier, JwksVerifier):
         refresh_task: asyncio.Task[None] | None = None
