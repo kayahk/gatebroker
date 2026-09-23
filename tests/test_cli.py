@@ -12,6 +12,7 @@ from click.testing import CliRunner
 
 import gatebroker.cli as cli
 from gatebroker import profile
+from gatebroker.build_info import BuildInfo
 
 
 @pytest.fixture(autouse=True)
@@ -330,7 +331,7 @@ def test_silent_token_acquisition_rejects_multiple_cached_accounts(monkeypatch) 
     with pytest.raises(click.ClickException, match="Multiple cached accounts"):
         cli._acquire_access_token()
 
-    application.acquire_token_silent.assert_not_called()
+    application.acquire_token_silent_with_error.assert_not_called()
 
 
 def test_exec_reports_a_missing_child_command_without_a_traceback(monkeypatch) -> None:
@@ -1049,6 +1050,19 @@ def test_a_profile_that_fails_validation_leaves_the_module_untouched(
 
     assert state() == before
     assert profile.DEVELOPMENT is False
+
+
+def test_version_command_reports_build_information_without_credentials(monkeypatch) -> None:
+    info = BuildInfo(version="1.2.3", build="release", revision="a" * 40)
+    monkeypatch.setattr(cli, "build_info", lambda: info)
+    monkeypatch.setattr(
+        cli.keyring, "get_password", Mock(side_effect=AssertionError("must not read keyring"))
+    )
+
+    result = CliRunner().invoke(cli.main, ["version"])
+
+    assert result.exit_code == 0
+    assert result.output == f"gabro 1.2.3\nbuild: release\nrevision: {'a' * 40}\n"
 
 
 def test_version_reports_an_unconfigured_build(monkeypatch) -> None:

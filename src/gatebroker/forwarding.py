@@ -198,6 +198,7 @@ def create_app(
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         **({} if ssl_context is None else {"verify": ssl_context}),
     )
+    app.state.upstream_client = upstream_client
     app.router.on_shutdown.append(upstream_client.aclose)
 
     @app.get("/v1/models")

@@ -23,6 +23,7 @@ import msal
 from keyring.errors import KeyringError, PasswordDeleteError
 
 from gatebroker import __version__, profile
+from gatebroker.build_info import build_info
 from gatebroker.claude_launch import augment_claude_environment, is_claude_command
 from gatebroker.codex_launch import augment_codex_command, is_codex_command
 from gatebroker.copilot_launch import augment_copilot_environment
@@ -577,15 +578,6 @@ def _load_windows_chunked_cache_unlocked(serialized: str) -> str:
     return "".join(chunks)
 
 
-def _delete_windows_cache_chunks(serialized: str | None) -> None:
-    manifest = _windows_cache_manifest(serialized)
-    if manifest is None:
-        return
-    generation, count, cleanup = manifest
-    if _delete_windows_cache_manifest_entries([(generation, count), *cleanup]):
-        raise click.ClickException("The operating-system credential store is unavailable.")
-
-
 def _store_cache(serialized: str) -> None:
     try:
         with _windows_cache_lock():
@@ -934,6 +926,15 @@ def main() -> None:
             f"Using the development profile from {os.environ.get(_DEV_PROFILE_VARIABLE)}",
             err=True,
         )
+
+
+@main.command()
+def version() -> None:
+    """Show CLI version and build information."""
+    info = build_info()
+    click.echo(f"gabro {info.version}")
+    click.echo(f"build: {info.build}")
+    click.echo(f"revision: {info.revision}")
 
 
 def _configure_local_agent(agent: str, command: Sequence[str], *, reset: bool) -> None:

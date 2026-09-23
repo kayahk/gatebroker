@@ -58,12 +58,15 @@ spec:
             - name: GABRO_KEY_DIR
               value: /etc/gatebroker
 
-            # Upstream gateway. Must be HTTPS on port 443 unless the
-            # cluster-local plaintext opt-in below is set.
+            # Upstream gateway. Any OpenAI- or Anthropic-compatible endpoint;
+            # the broker does not special-case a vendor. Must be HTTPS on port
+            # 443 unless the cluster-local plaintext opt-in below is set.
             - name: GABRO_UPSTREAM_BASE_URL
               value: https://REPLACE_GATEWAY_HOST
             - name: GABRO_UPSTREAM_TRUSTED_HOSTS
               value: REPLACE_GATEWAY_HOST
+            # Optional traces: set OTEL_EXPORTER_OTLP_ENDPOINT on the pod when
+            # you want OTLP/gRPC export. The runtime stays silent without it.
 
             # Optional. Permits an http:// upstream, and only toward in-cluster
             # Service DNS names, for a same-cluster gateway hop.

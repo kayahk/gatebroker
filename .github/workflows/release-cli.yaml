@@ -80,10 +80,39 @@ jobs:
       - name: Build self-contained executable
         shell: bash
         run: |
+          release_version="${GITHUB_REF_NAME#v}"
+          test -n "${release_version}"
+          build_info="${RUNNER_TEMP}/gabro_build_info.json"
+          python - <<'PY' > "${build_info}"
+          import json
+          import os
+
+          print(json.dumps({
+              "build": "release",
+              "revision": os.environ["GITHUB_SHA"],
+              "version": os.environ["GITHUB_REF_NAME"].removeprefix("v"),
+          }, separators=(",", ":")))
+          PY
+          pyinstaller_separator=":"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            pyinstaller_separator=";"
+          fi
           uv run python -m PyInstaller --noconfirm --clean --onefile --name gabro \
-            --collect-all keyring src/gatebroker/cli.py
+            --collect-all keyring \
+            --add-data "${build_info}${pyinstaller_separator}." \
+            src/gatebroker/cli.py
           mkdir -p "release/gabro-${{ matrix.platform }}"
           cp "dist/${{ matrix.executable }}" "release/gabro-${{ matrix.platform }}/"
+
+      - name: Verify the bundle starts
+        shell: bash
+        run: |
+          executable="release/gabro-${{ matrix.platform }}/${{ matrix.executable }}"
+          "${executable}" --help > /dev/null
+          "${executable}" version > build-info.txt
+          grep -Fx "gabro ${GITHUB_REF_NAME#v}" build-info.txt
+          grep -Fx "build: release" build-info.txt
+          grep -Fx "revision: ${GITHUB_SHA}" build-info.txt
 
       - name: Check for macOS signing configuration
         id: macos_signing
