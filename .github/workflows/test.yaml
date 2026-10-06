@@ -51,4 +51,6 @@ jobs:
         run: |
           uv run ruff check .
           uv run bandit -q -r src
-          uv run pip-audit
+          # The project itself is installed editable and is not published on PyPI.
+          # Audit third-party dependencies without querying PyPI for gatebroker.
+          uv run pip-audit --skip-editable
